@@ -30,8 +30,8 @@ void main() async {
     ),
   );
 
-  // OFFLINE-FIRST: Firestore data ko device pe cache karta hai aur
-  // offline likhe gaye writes net aate hi khud sync ho jaate hain.
+  // Keep a copy of the data on the device. Changes made offline sync
+  // automatically once the internet is back.
   FirebaseFirestore.instance.settings = const Settings(
     persistenceEnabled: true,
     cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
@@ -41,39 +41,33 @@ void main() async {
   runApp(const AttendanceApp());
 }
 
-// =====================================================================
-// APP-WIDE CONSTANTS
-// =====================================================================
+// App-wide constants
 const List<String> kSections = ['A', 'B', 'C', 'D'];
 const List<String> kSemesterIds = ['1', '2', '3', '4', '5', '6', '7', '8'];
 
-// Teacher ke liye marking window: har ghante ke pehle 20 minute.
+// Teachers can mark attendance only in the first 20 minutes of each hour.
 const int kMarkWindowMinutes = 20;
 
-// Time-picker ki range: 6:00 AM se 6:00 PM tak.
+// Time picker range: 6:00 AM to 6:00 PM.
 const int kPickerStartHour = 6;
 const int kPickerEndHour = 18;
 
-// Admin Login pe naya account banane ka option. Teachers bhi isi app
-// mein sign-up karte hain, isliye ise false rakha hai warna koi bhi
-// teacher admin ban sakta tha. Naya admin Firebase console se banaiye.
+// Lets people create a new admin account on the Admin Login screen. It is false
+// because teachers also sign up in this app, and otherwise any teacher could
+// become an admin. Create new admins from the Firebase console.
 const bool kAllowAdminSignUp = false;
 
-// ---- Doosra (chhupa hua) admin ----
-// Ye department collection mein ek aam department jaisa dikhta hai.
-// App sirf username match karke ise admin pehchanta hai.
-// Department ka naam yahan badal sakte hain (koi aam sa naam rakhiye).
+// ---- Second (hidden) admin ----
+// Stored like a normal department. The app finds this admin only by matching
+// the username. You can change the department name to anything ordinary.
 const String kHiddenAdminDeptName = 'Information Technology';
 const String kHiddenAdminUsername = 'BUDDY';
 const String kHiddenAdminPassword = 'buddy11';
 
-const String SOFTWARE_ENGINEERING_DEPT_ID = "Software Engineering";
+const String kSoftwareEngineeringDeptId = "Software Engineering";
 
-// =====================================================================
-// THEME / DESIGN TOKENS
-// Ink-navy background, ek hi amber accent. Present = green,
-// Absent = red (sirf meaning ke liye).
-// =====================================================================
+// Theme and colors: dark navy background with one amber accent. Green means
+// present, red means absent.
 const Color kBg = Color(0xFF0F1419);
 const Color kSurface = Color(0xFF171E27);
 const Color kSurfaceHi = Color(0xFF1F2833);
@@ -131,7 +125,7 @@ class AttendanceApp extends StatelessWidget {
   }
 }
 
-// ---------------- Chhote reusable UI widgets ----------------
+// ---- Small reusable widgets ----
 class AppCard extends StatelessWidget {
   final Widget child;
   final VoidCallback? onTap;
@@ -253,15 +247,13 @@ void showSnack(BuildContext context, String msg, {Color? color}) {
   );
 }
 
-// =====================================================================
-// SESSION (kaun login hai: admin ya teacher)
-// =====================================================================
+// Session: who is logged in (admin or teacher)
 class AppSession {
-  // kind: '' (koi nahi / Firebase admin), 'teacher', 'hidden' (doosra admin)
+  // kind: '' (none / Firebase admin), 'teacher', or 'hidden' (second admin)
   static String kind = '';
   static String teacherId = '';
   static String teacherName = '';
-  static bool isAdmin = false; // RootGate set karta hai
+  static bool isAdmin = false; // set by RootGate
   static final ValueNotifier<int> tick = ValueNotifier<int>(0);
 
   static bool get isTeacher => !isAdmin;
@@ -302,7 +294,7 @@ class AppSession {
     unawaited(_anon());
   }
 
-  // Firebase email se admin login hone par purana session saaf karo.
+  // Clear the old session when logging in as a Firebase admin.
   static Future<void> clearForFirebaseAdmin() async {
     kind = '';
     teacherId = '';
@@ -312,8 +304,8 @@ class AppSession {
     } catch (_) {}
   }
 
-  // Best-effort: agar Firestore rules mein "request.auth != null" hai
-  // to teacher/doosre admin ke liye anonymous sign-in madad karta hai.
+  // Best effort: if the Firestore rules need request.auth != null, an anonymous
+  // sign-in lets teachers and the second admin through.
   static Future<void> _anon() async {
     try {
       if (FirebaseAuth.instance.currentUser == null) {
@@ -339,7 +331,7 @@ class AppSession {
   }
 }
 
-// Logout se pehle, offline hone par confirm karwao.
+// Ask for confirmation before logging out while offline.
 Future<void> confirmAndLogout(BuildContext context) async {
   if (!await _isOnline()) {
     if (!context.mounted) return;
@@ -365,7 +357,7 @@ Future<void> confirmAndLogout(BuildContext context) async {
   }
   await AppSession.logout();
 }
-// ROOT GATE: login status ke hisaab se sahi screen
+// Root gate: shows the right screen based on the login status
 class RootGate extends StatelessWidget {
   const RootGate({super.key});
 
@@ -410,7 +402,7 @@ class RootGate extends StatelessWidget {
     );
   }
 }
-// WELCOME SCREEN (Admin Login / Teacher Login)
+// Welcome screen (Admin Login / Teacher Login)
 class WelcomeScreen extends StatelessWidget {
   const WelcomeScreen({super.key});
 
@@ -494,11 +486,8 @@ class WelcomeScreen extends StatelessWidget {
   }
 }
 
-// =====================================================================
-// ADMIN LOGIN SCREEN
-// (pehle "Login" tha; ab "Admin Login". Email ke bajaye username
-// daalne par doosre admin ka check hota hai.)
-// =====================================================================
+// Admin login screen
+// Admins sign in with an email, or with a username for the second admin.
 class AdminLoginScreen extends StatefulWidget {
   const AdminLoginScreen({super.key});
 
@@ -532,7 +521,7 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
 
     try {
       if (id.contains('@')) {
-        // ---- Pehla admin: Firebase email/password ----
+        // ---- First admin: Firebase email/password ----
         if (_isLogin || !kAllowAdminSignUp) {
           await FirebaseAuth.instance
               .signInWithEmailAndPassword(email: id, password: password)
@@ -545,7 +534,8 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
         await AppSession.clearForFirebaseAdmin();
         if (mounted) Navigator.of(context).popUntil((r) => r.isFirst);
       } else {
-        // ---- Doosra admin: departments collection mein username/password ----
+        // ---- Second admin: username/password from the departments collection
+        // ----
         final ok = await _checkHiddenAdmin(id, password);
         if (ok) {
           await AppSession.loginHiddenAdmin();
@@ -672,11 +662,9 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
   }
 }
 
-// =====================================================================
-// TEACHER LOGIN / SIGN UP
-// teachers/{username} -> name, username, password
-// Sign-up par admin approval nahi chahiye.
-// =====================================================================
+// Teacher login / sign up
+// Stored at teachers/{username}: name, username, password.
+// Sign-up does not need admin approval.
 class TeacherAuthScreen extends StatefulWidget {
   const TeacherAuthScreen({super.key});
 
@@ -744,7 +732,7 @@ class _TeacherAuthScreenState extends State<TeacherAuthScreen> {
           setState(() => _error = 'This username is already taken');
           return;
         }
-        // await nahi: offline me set() complete nahi hota.
+        // Not awaited: set() does not complete while offline.
         unawaited(ref.set({
           'name': name,
           'username': username,
@@ -850,9 +838,7 @@ class _TeacherAuthScreenState extends State<TeacherAuthScreen> {
   }
 }
 
-// =====================================================================
-// SEED DATA (sirf pehli baar Firestore me daalne ke liye)
-// =====================================================================
+// Seed data (written to Firestore only the first time)
 final List<Map<String, String>> initialStudents = [
   {"roll": "1", "name": "Muhammad Ahmad"},
   {"roll": "2", "name": "Usman Ahmad"},
@@ -917,7 +903,7 @@ final List<String> initialSubjects = [
   "CALCULUS"
 ];
 
-// Department ab sirf naam se bante hain (koi username/password nahi).
+// Departments are created with a name only (no username or password).
 final List<String> fixedDepartments = [
   "Software Engineering",
   "Computer Science",
@@ -926,14 +912,12 @@ final List<String> fixedDepartments = [
   "A.I.",
 ];
 
-// =====================================================================
-// FIRESTORE PATH HELPERS
+// Firestore path helpers
 // departments/{dept}/sections/{A-D}/semesters/{1-8}/
-//     students/{key}      key = roll, duplicate roll => roll__2, roll__3 ...
-//     subjects/{name}                 (claimed_by, claimed_by_name)
+//     students/{key}      key = roll; duplicate rolls become roll__2, roll__3 ...
+//     subjects/{name}                    (claimed_by, claimed_by_name)
 //     subjects/{name}/overrides/{roll}   (subject-level add / soft-remove)
 //     attendance/{subject}/dates/{date_Session_n}
-// =====================================================================
 class SemRef {
   final String deptId;
   final String section;
@@ -973,7 +957,8 @@ CollectionReference<Map<String, dynamic>> teacherClaimsRef(String teacherId) =>
 DocumentReference<Map<String, dynamic>> permissionsRef() =>
     FirebaseFirestore.instance.collection('settings').doc('permissions');
 
-// ---- Purane (section se pehle wale) paths: sirf migration/delete ke liye ----
+// ---- Old paths (from before sections existed), used only for migration and
+// delete ----
 CollectionReference<Map<String, dynamic>> legacyStudentsRef(String deptId) =>
     FirebaseFirestore.instance
         .collection('departments')
@@ -988,7 +973,7 @@ CollectionReference<Map<String, dynamic>> legacySubjectsRef(String deptId) =>
 
 CollectionReference<Map<String, dynamic>> legacyDatesRef(
     String deptId, String subjectName) {
-  if (deptId == SOFTWARE_ENGINEERING_DEPT_ID) {
+  if (deptId == kSoftwareEngineeringDeptId) {
     return FirebaseFirestore.instance
         .collection('attendance')
         .doc(subjectName)
@@ -1002,15 +987,14 @@ CollectionReference<Map<String, dynamic>> legacyDatesRef(
       .collection('dates');
 }
 
-// =====================================================================
-// OFFLINE-SAFE READ HELPERS
-// =====================================================================
+// Offline-safe read helpers
 const Duration _kNetworkTimeout = Duration(seconds: 2);
 
-// "Wi-Fi connected" does not always mean "internet works". _netState() adds a
-// quick DNS probe (cached for a few seconds) so that when the phone is
-// connected-but-offline we go straight to the local cache instead of waiting
-// for network timeouts on every screen. That waiting was the "endless loading".
+// Wi-Fi being connected does not always mean the internet works. _netState()
+// adds a quick DNS check (cached for a few seconds). When the phone is
+// connected but offline, we go straight to the local cache instead of waiting
+// for a timeout on every screen. That waiting was the cause of the endless
+// loading.
 enum _Net { none, unreachable, reachable }
 
 _Net? _netCache;
@@ -1073,7 +1057,7 @@ Future<DocumentSnapshot<Map<String, dynamic>>> safeGetDoc(
     try {
       return await ref.get(cacheOnly);
     } catch (_) {
-      // Not cached yet: give the server a little longer.
+      // Not cached yet: give the server a little more time.
       return server.timeout(const Duration(seconds: 8));
     }
   }
@@ -1107,8 +1091,8 @@ Future<QuerySnapshot<Map<String, dynamic>>> safeGetQuery(
     } catch (_) {}
     final cached = await query.get(cacheOnly);
     if (cached.docs.isNotEmpty) return cached;
-    // Nothing cached: wait a little longer for the server instead of
-    // showing an empty list.
+    // Nothing cached: wait a bit longer for the server instead of showing an
+    // empty list.
     try {
       return await server.timeout(const Duration(seconds: 8));
     } catch (_) {
@@ -1130,7 +1114,7 @@ class _QRes {
   const _QRes(this.docs, this.fromCache);
 }
 
-// Never throws: on any failure returns an empty, "from cache" result.
+// Never throws. On any failure it returns an empty result marked as from cache.
 Future<_QRes> _safeQuery(Query<Map<String, dynamic>> query) async {
   try {
     final snap = await safeGetQuery(query);
@@ -1140,9 +1124,8 @@ Future<_QRes> _safeQuery(Query<Map<String, dynamic>> query) async {
   }
 }
 
-// Cache-first live query for StreamBuilders. The first event comes from the
-// on-device cache right away (no spinner while offline), then Firestore's
-// live updates take over.
+// Cache-first live query for StreamBuilders. The first result comes from the
+// device cache right away, then live updates take over.
 Stream<QuerySnapshot<Map<String, dynamic>>> liveQuery(
     Query<Map<String, dynamic>> q) {
   late final StreamController<QuerySnapshot<Map<String, dynamic>>> ctrl;
@@ -1168,8 +1151,8 @@ Stream<QuerySnapshot<Map<String, dynamic>>> liveQuery(
             ctrl.add(cached);
             return;
           }
-          // Empty cache: give the live stream a moment, then show the
-          // (empty) cached result instead of spinning forever.
+          // Empty cache: give the live stream a moment, then show the empty
+          // result instead of loading forever.
           await Future.delayed(const Duration(milliseconds: 1500));
           if (!gotLive && !cancelled) ctrl.add(cached);
         } catch (_) {}
@@ -1183,10 +1166,8 @@ Stream<QuerySnapshot<Map<String, dynamic>>> liveQuery(
   return ctrl.stream;
 }
 
-// ---------------------------------------------------------------------
-// Attendance doc = {roll: 'P'/'A', ...} + meta keys jo '_' se shuru
-// hote hain: _time (HH:mm), _marked_by, _marked_by_name.
-// ---------------------------------------------------------------------
+// An attendance doc is {roll: 'P'/'A', ...} plus meta keys that start with '_':
+// _time (HH:mm), _marked_by, _marked_by_name.
 class ParsedAttendance {
   final Map<String, String> status;
   final Map<String, String> meta;
@@ -1228,8 +1209,8 @@ String fmtHhmm(String? s) {
 }
 
 // ---- Shared Excel layout ----
-// Monthly aur Overall, dono Excel exports isi se bante hain.
-// Layout: University of Swabi / Subject / Session row / Date row / Time row / students.
+// Both the monthly and overall exports use this layout: university name,
+// subject, session row, date row, time row, then the students.
 List<int>? buildAttendanceExcelBytes({
   required String subject,
   required List<DateRecord> recs,
@@ -1309,22 +1290,23 @@ List<int>? buildAttendanceExcelBytes({
   final pctCol = totalClassesCol + 3;
   final lastCol = pctCol;
 
-  // Row 0: H1 "University of Swabi", Row 1: H2 "Subject: <naam>"
-  // Merge ki jagah text beech wale column mein center-aligned rakha hai;
-  // baqi cells khaali hain, to text dono taraf barabar phail kar table ke dar-miyan dikhta hai.
+  // Row 0: "University of Swabi". Row 1: "Subject: <name>".
+  // The text is centered in the middle column instead of merging cells. The
+  // other cells stay empty, so the text spreads evenly across the table.
   final midCol = lastCol ~/ 2;
   for (int c = 0; c <= lastCol; c++) {
     if (c == midCol) {
       put(c, 0, excel_lib.TextCellValue('University of Swabi'), titleStyle);
       put(c, 1, excel_lib.TextCellValue('Subject: $subject'), subjectStyle);
     } else {
-      // sirf style, value nahi - warna text phailne se ruk jata hai
+      // style only, no value (otherwise the text stops spreading)
       sheet.cell(ci(c, 0)).cellStyle = titleStyle;
       sheet.cell(ci(c, 1)).cellStyle = subjectStyle;
     }
   }
 
-  // Rows 2-3: Session (upar) + Date (neeche), har session ke liye alag cells
+  // Rows 2-3: session on top and date below, with separate cells for each
+  // session
   mergePut(0, 2, 0, 3, 'Roll No', headStyle);
   mergePut(1, 2, 1, 3, 'Name', headStyle);
   for (int i = 0; i < n; i++) {
@@ -1341,7 +1323,7 @@ List<int>? buildAttendanceExcelBytes({
   mergePut(absentCol, 2, absentCol, 3, 'Total Absent', headStyle);
   mergePut(pctCol, 2, pctCol, 3, 'Percentage (%)', headStyle);
 
-  // Row 4: time at which each session was taken
+  // Row 4: time of each session
   put(0, 4, excel_lib.TextCellValue(''), timeStyle);
   put(1, 4, excel_lib.TextCellValue('Time'), timeStyle);
   for (int i = 0; i < n; i++) {
@@ -1385,7 +1367,7 @@ List<int>? buildAttendanceExcelBytes({
     rowIndex++;
   }
 
-  // Column widths: P/A wale columns chhote, naam poora dikhe
+  // Column widths: narrow P/A columns, wide name column
   sheet.setColumnWidth(0, 8);
   sheet.setColumnWidth(1, (maxName * 1.15 + 3).clamp(18, 45).toDouble());
   for (int i = 0; i < n; i++) {
@@ -1407,10 +1389,10 @@ List<int>? buildAttendanceExcelBytes({
 }
 
 // ---- Student loaders ----
-// Student ka internal key (jo poore app mein "roll" naam se chalta hai).
-// Pehla student "12", usi roll ka doosra "12__2", teesra "12__3" ...
-// Isse same roll / same naam wale students ek doosre ko overwrite nahi karte.
-// Screen / Excel par hamesha rollOf(key) yaani sirf "12" dikhta hai.
+// Internal key of a student (called "roll" across the app). The first student
+// with roll "12" gets "12", the next gets "12__2", then "12__3" and so on. This
+// way students with the same roll or name never overwrite each other. Screens
+// and Excel always show rollOf(key), which is just "12".
 String rollOf(String key) {
   final i = key.indexOf('__');
   return i < 0 ? key : key.substring(0, i);
@@ -1439,7 +1421,7 @@ List<Map<String, String>> _sortedStudents(Map<String, String> m) {
   return list;
 }
 
-// Semester labels (custom naam) - copy dialog ke liye.
+// Semester labels (custom names), used by the copy dialog.
 Future<Map<String, String>> loadSemesterLabels(
     String deptId, String section) async {
   final res = await _safeQuery(FirebaseFirestore.instance
@@ -1456,10 +1438,10 @@ Future<Map<String, String>> loadSemesterLabels(
   return out;
 }
 
-// [from] semester ke saare students [to] semester mein COPY karta hai
-// (same department + section). Source mein student rehte hain; destination
-// mein jo pehle se hai uspar kuch overwrite nahi hota - agar roll wahan
-// already hai to naya unique key ban jata hai. Return: copy hue students.
+// Copies all students of semester [from] into semester [to] (same department
+// and section). The source keeps its students and nothing in the destination is
+// overwritten: if a roll already exists there, a new unique key is created.
+// Returns the number of students copied.
 Future<int> copyStudentsToSemester(SemRef from, SemRef to) async {
   final src = await loadSemesterStudents(from);
   if (src.isEmpty) return 0;
@@ -1477,9 +1459,9 @@ Future<int> copyStudentsToSemester(SemRef from, SemRef to) async {
   return src.length;
 }
 
-// Semester ki master list (admin isi ko manage karta hai).
-// Firestore (server/cache) first; if nothing is cached yet we fall back to
-// the SQLite copy so the list is never empty just because we are offline.
+// Master list of a semester (managed by the admin). It reads Firestore first
+// (server or cache). If nothing is cached yet, it falls back to the SQLite copy
+// so the list is not empty just because we are offline.
 Future<List<Map<String, String>>> loadSemesterStudents(SemRef sem) async {
   final res = await _safeQuery(sem.students);
   final m = <String, String>{};
@@ -1493,7 +1475,7 @@ Future<List<Map<String, String>>> loadSemesterStudents(SemRef sem) async {
   return _sortedStudents(m);
 }
 
-// Subject-level overrides: roll -> {'name':..., 'kind': 'extra'|'hidden'}
+// Subject-level overrides: roll -> {'name': ..., 'kind': 'extra' | 'hidden'}
 Future<Map<String, Map<String, String>>> loadOverrides(
     SemRef sem, String subject) async {
   final res = await _safeQuery(sem.overrides(subject));
@@ -1511,7 +1493,7 @@ Future<Map<String, Map<String, String>>> loadOverrides(
   return out;
 }
 
-// Ek subject ki asli list = master list - "hidden" + "extra".
+// Actual student list of a subject = master list - hidden + extra.
 Future<List<Map<String, String>>> loadSubjectStudents(
     SemRef sem, String subject) async {
   final masterF = loadSemesterStudents(sem);
@@ -1529,7 +1511,7 @@ Future<List<Map<String, String>>> loadSubjectStudents(
   return _sortedStudents(m);
 }
 
-// One attendance record (one date + session) of a subject.
+// One attendance record (one date and session) of a subject.
 class DateRecord {
   final String id; // yyyy-MM-dd_Session_n
   final Map<String, String> status; // roll -> 'P' / 'A'
@@ -1537,8 +1519,8 @@ class DateRecord {
   DateRecord(this.id, this.status, this.meta);
 }
 
-// All attendance records of a subject in ONE read (sorted by id).
-// Falls back to the SQLite copy when Firestore has nothing cached.
+// All attendance records of a subject in one read (sorted by id). Falls back to
+// the SQLite copy when Firestore has nothing cached.
 Future<List<DateRecord>> loadDateRecords(SemRef sem, String subject) async {
   final res = await _safeQuery(sem.dates(subject));
   List<DateRecord> out;
@@ -1554,9 +1536,7 @@ Future<List<DateRecord>> loadDateRecords(SemRef sem, String subject) async {
   return out;
 }
 
-// =====================================================================
-// CLAIM / UNCLAIM (teacher)
-// =====================================================================
+// Claim / unclaim a subject (teacher)
 class ClaimException implements Exception {
   final String message;
   ClaimException(this.message);
@@ -1583,8 +1563,8 @@ Future<void> claimSubject(
   if (confirm != true) return;
   if (!context.mounted) return;
 
-  // Transaction ke liye internet zaroori hai (do teachers ek saath claim
-  // na kar saken, isliye server se hi confirm hona chahiye).
+  // A transaction needs internet so the server can confirm that two teachers
+  // cannot claim the same subject.
   if ((await _netState()) != _Net.reachable) {
     if (context.mounted) {
       showSnack(context, 'An internet connection is required to claim a subject.');
@@ -1663,9 +1643,7 @@ Future<void> unclaimSubject(
   if (context.mounted) showSnack(context, "You left '$subject'");
 }
 
-// =====================================================================
-// FIRESTORE DELETE HELPERS
-// =====================================================================
+// Firestore delete helpers
 Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>> _getDocsForDelete(
     Query<Map<String, dynamic>> query) async {
   try {
@@ -1692,7 +1670,7 @@ void _deleteDocs(List<QueryDocumentSnapshot<Map<String, dynamic>>> docs) {
   }
 }
 
-// Subject delete hone par, jis teacher ne le rakha tha uski claim bhi hatao.
+// When a subject is deleted, also remove the teacher's claim on it.
 Future<void> _cleanupClaimOfSubject(
     SemRef sem, String subject, Map<String, dynamic>? subjectData) async {
   final cb = (subjectData?['claimed_by'] ?? '').toString();
@@ -1713,7 +1691,8 @@ Future<void> deleteSubjectEverywhere(SemRef sem, String subject) async {
   await LocalDb.deleteSubject(sem, subject);
 }
 
-// Poora department delete: har section/semester ka sab kuch + purana data
+// Delete a whole department: everything in every section and semester, plus old
+// data.
 Future<void> deleteDepartmentEverywhere(String deptId) async {
   unawaited(FirebaseFirestore.instance
       .collection('meta')
@@ -1735,7 +1714,7 @@ Future<void> deleteDepartmentEverywhere(String deptId) async {
     }
   }
 
-  // Purana (section se pehle ka) data, agar bacha ho
+  // Old data from before sections existed, if any is left
   final oldSubjects = await _getDocsForDelete(legacySubjectsRef(deptId));
   for (final sub in oldSubjects) {
     _deleteDocs(await _getDocsForDelete(legacyDatesRef(deptId, sub.id)));
@@ -1752,10 +1731,10 @@ Future<void> deleteDepartmentEverywhere(String deptId) async {
   await LocalDb.deleteDepartment(deptId);
 }
 
-// Admin only: removes EVERY attendance record of EVERY subject from
-// Firestore, the SQLite database and the on-device cache. Departments,
-// subjects and students are not touched. Needs internet so that the
-// server copy is really deleted (throws otherwise).
+// Admin only: deletes every attendance record of every subject from Firestore,
+// SQLite and the on-device cache. Departments, subjects and students are not
+// touched. Needs internet so the server copy is really deleted (throws
+// otherwise).
 Future<void> deleteAllAttendanceEverywhere() async {
   final fs = FirebaseFirestore.instance;
   final snap =
@@ -1774,12 +1753,10 @@ Future<void> deleteAllAttendanceEverywhere() async {
   await LocalDb.deleteAllAttendance();
 }
 
-// =====================================================================
-// ONE-TIME MIGRATION: purana Software Engineering data
+// One-time migration of the old Software Engineering data
 //   -> Software Engineering / Section A / Semester 3
-// Purana data DELETE nahi hota, sirf copy hota hai (safe). Dobara
-// chalane par bhi kuch bigadta nahi (merge).
-// =====================================================================
+// The old data is copied, not deleted, so this is safe. Running it again
+// changes nothing (it merges).
 Future<void> _copyDocs(
   List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
   DocumentReference<Map<String, dynamic>> Function(
@@ -1810,18 +1787,18 @@ Future<bool> migrateSoftwareEngineeringLegacy() async {
       return false;
     }
 
-    final target = SemRef(SOFTWARE_ENGINEERING_DEPT_ID, 'A', '3');
+    final target = SemRef(kSoftwareEngineeringDeptId, 'A', '3');
 
     final students =
-        await legacyStudentsRef(SOFTWARE_ENGINEERING_DEPT_ID).get().timeout(t);
+        await legacyStudentsRef(kSoftwareEngineeringDeptId).get().timeout(t);
     await _copyDocs(students.docs, (d) => target.students.doc(d.id));
 
     final subjects =
-        await legacySubjectsRef(SOFTWARE_ENGINEERING_DEPT_ID).get().timeout(t);
+        await legacySubjectsRef(kSoftwareEngineeringDeptId).get().timeout(t);
     await _copyDocs(subjects.docs, (d) => target.subjects.doc(d.id));
 
     for (final sub in subjects.docs) {
-      final dates = await legacyDatesRef(SOFTWARE_ENGINEERING_DEPT_ID, sub.id)
+      final dates = await legacyDatesRef(kSoftwareEngineeringDeptId, sub.id)
           .get()
           .timeout(t);
       await _copyDocs(dates.docs, (d) => target.dates(sub.id).doc(d.id));
@@ -1837,9 +1814,7 @@ Future<bool> migrateSoftwareEngineeringLegacy() async {
   }
 }
 
-// =====================================================================
-// DOOSRA ADMIN BANANA (ek hi baar): ek aam department jaisa doc
-// =====================================================================
+// Create the second admin (one time): a doc that looks like a normal department
 Future<void> ensureHiddenAdminDepartment() async {
   try {
     final prefs = await SharedPreferences.getInstance();
@@ -1869,13 +1844,11 @@ Future<void> ensureHiddenAdminDepartment() async {
   } catch (_) {}
 }
 
-// =====================================================================
-// LOCAL SQLITE DATABASE (Firestore ke SAATH-SAATH, uski jagah nahi)
-// Har function error ko andar hi pakad leta hai — SQLite mein dikkat
-// aaye to bhi app ya Firestore ka kaam nahi rukta.
-// Passwords yahan SAVE NAHI hote. Department ka username bhi nahi
-// (taaki export mein doosre admin ka pata na chale).
-// =====================================================================
+// Local SQLite database (used alongside Firestore, not instead of it)
+// Every function catches its own errors, so an SQLite problem never stops the
+// app or Firestore.
+// Passwords are NOT saved here. The department username is not saved either, so
+// an export does not reveal the second admin.
 class LocalDb {
   static sql.Database? _db;
   static bool _syncing = false;
@@ -1923,9 +1896,9 @@ class LocalDb {
       path,
       version: 2,
       onCreate: (db, version) async => _createAll(db),
-      // v1 -> v2: structure badal gaya (section/semester). Local DB sirf
-      // Firestore ki copy hai, isliye purani tables hata kar naye bana
-      // dete hain; data internet aate hi Firestore se wapas bhar jata hai.
+      // v1 -> v2: the structure changed (sections and semesters). The local DB
+      // is only a copy of Firestore, so we drop the old tables and create new
+      // ones. The data fills back in from Firestore when the internet returns.
       onUpgrade: (db, oldV, newV) async {
         for (final t in _tables) {
           await db.execute('DROP TABLE IF EXISTS $t');
@@ -2183,12 +2156,9 @@ class LocalDb {
     });
   }
 
-  // ---------------------------------------------------------------
-  // Firestore ka poora data padh kar SQLite ko uske barabar bana deta
-  // hai. collectionGroup se ek-ek collection ek hi query mein aa jaati
-  // hai; document ka path dekh kar pata chalta hai wo kis
-  // department/section/semester ka hai.
-  // ---------------------------------------------------------------
+  // Reads all Firestore data and rebuilds SQLite to match it. collectionGroup
+  // fetches each collection in one query, and the document path tells which
+  // department / section / semester it belongs to.
   static Future<bool> replaceAllFromFirestore() async {
     if (_syncing) return false;
     if (!await _isOnline()) return false;
@@ -2206,9 +2176,8 @@ class LocalDb {
       final teachers = await fs.collection('teachers').get().timeout(t);
       final claims = await fs.collectionGroup('claims').get().timeout(t);
 
-      // If anything came from the offline cache we are not really online:
-      // keep the existing SQLite data instead of replacing it with a
-      // partial copy.
+      // If any data came from the offline cache, we are not really online. Keep
+      // the existing SQLite data instead of replacing it with a partial copy.
       final allSnaps = [
         depts,
         semDocs,
@@ -2238,7 +2207,7 @@ class LocalDb {
       final claimRows = <Map<String, Object?>>[];
 
       for (final d in depts.docs) {
-        if (d.id == kHiddenAdminDeptName) continue; // chhupa hua admin
+        if (d.id == kHiddenAdminDeptName) continue; // hidden admin
         deptRows.add({
           'dept_id': d.id,
           'name': (d.data()['name'] ?? d.id).toString(),
@@ -2395,9 +2364,7 @@ class LocalDb {
     }
   }
 
-  // ---------------------------------------------------------------
-  // READS: offline fallback for the loaders + the monthly attendance view
-  // ---------------------------------------------------------------
+  // Reads: offline fallback for the loaders and the monthly attendance view
   static const String _semWhere =
       'dept_id = ? AND section = ? AND semester = ?';
 
@@ -2438,7 +2405,7 @@ class LocalDb {
     }
   }
 
-  // Attendance records of a subject from SQLite, grouped per session.
+  // Attendance records of a subject from SQLite, grouped by session.
   // monthPrefix = 'yyyy-MM' limits the result to one month.
   static Future<List<DateRecord>> dateRecords(SemRef s, String subject,
       {String? monthPrefix}) async {
@@ -2496,9 +2463,9 @@ class LocalDb {
     }
   }
 
-  // Light refresh of ONE subject's attendance from the server (used by the
-  // monthly view so SQLite also shows records marked on other devices).
-  // Returns true only when fresh server data was written.
+  // Quick refresh of one subject's attendance from the server (used by the
+  // monthly view so SQLite also shows records marked on other devices). Returns
+  // true only if fresh server data was written.
   static Future<bool> refreshSubjectAttendance(SemRef s, String subject) async {
     try {
       if ((await _netState()) != _Net.reachable) return false;
@@ -2548,8 +2515,8 @@ class LocalDb {
   }
 }
 
-// Refresh the SQLite copy from Firestore at most every few hours (and right
-// after the phone comes back online). Safe to call any time.
+// Refreshes the SQLite copy from Firestore at most every few hours, and right
+// after the phone comes back online. Safe to call any time.
 Future<void> syncLocalDbIfStale({bool force = false}) async {
   try {
     final prefs = await SharedPreferences.getInstance();
@@ -2564,9 +2531,8 @@ Future<void> syncLocalDbIfStale({bool force = false}) async {
   } catch (_) {}
 }
 
-// Login-time prefetch: collectionGroup se students/subjects/semesters/
-// attendance ek-ek query mein cache ho jaate hain, taaki offline mein bhi
-// saari lists aur attendance dikhe.
+// Login-time prefetch: students, subjects, semesters and attendance are cached
+// with one query each, so the lists and attendance also show up offline.
 Future<void> prefetchAllData() async {
   try {
     if ((await _netState()) != _Net.reachable) return;
@@ -2587,12 +2553,10 @@ Future<void> prefetchAllData() async {
   } catch (_) {}
 }
 
-// =====================================================================
-// DEPARTMENTS SCREEN (login ke baad pehli screen — admin aur teacher dono)
-// =====================================================================
+// Departments screen (first screen after login, for admin and teacher)
 class DepartmentsScreen extends StatefulWidget {
-  // claimMode = the teacher's "Claim Subject" entry point:
-  // Department -> Section -> Semester -> Subject (tap to claim).
+  // claimMode is the teacher's "Claim Subject" entry point: Department ->
+  // Section -> Semester -> Subject (tap to claim).
   final bool claimMode;
   const DepartmentsScreen({super.key, this.claimMode = false});
 
@@ -2613,7 +2577,7 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
   void initState() {
     super.initState();
     if (widget.claimMode) {
-      // Teacher home already did the prefetch / sync.
+      // The teacher home already did the prefetch and sync.
       _seeded = true;
       return;
     }
@@ -2649,8 +2613,8 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
     super.dispose();
   }
 
-  // Admin ke login par ek ke baad ek: seed -> doosra admin -> purana
-  // Software Engineering data ko Section A / Semester 3 mein copy -> local sync
+  // On admin login, run these in order: seed -> second admin -> copy old
+  // Software Engineering data into Section A / Semester 3 -> local sync.
   Future<void> _adminBootstrap() async {
     await _ensureSeedData();
     await ensureHiddenAdminDepartment();
@@ -2701,9 +2665,9 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
         }
       }
 
-      // Software Engineering ke purane students/subjects ab seedha
-      // Section A / Semester 3 mein seed hote hain.
-      final target = SemRef(SOFTWARE_ENGINEERING_DEPT_ID, 'A', '3');
+      // The old Software Engineering students and subjects are now seeded
+      // directly into Section A / Semester 3.
+      final target = SemRef(kSoftwareEngineeringDeptId, 'A', '3');
       final studentsSnap = await target.students.limit(1).get().timeout(_kNetworkTimeout);
       if (studentsSnap.docs.isEmpty) {
         var batch = firestore.batch();
@@ -2733,8 +2697,8 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
     if (mounted) setState(() => _seeded = true);
   }
 
-  // Department ke apne password hata diye gaye hain, isliye delete
-  // confirm karne ke liye department ka naam type karwate hain.
+  // Departments no longer have their own passwords, so we ask the user to type
+  // the department name to confirm the delete.
   void _confirmDeleteDepartment(String deptId, String deptName) {
     final controller = TextEditingController();
     String? errorText;
@@ -2807,7 +2771,7 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
     );
   }
 
-  // Ab sirf department ka naam chahiye (username/password nahi).
+  // Only the department name is needed now (no username or password).
   void _showAddDepartmentDialog() {
     final nameController = TextEditingController();
 
@@ -2928,7 +2892,7 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
     );
   }
 
-  // Master switch: ek hi button, saare teachers ke liye ek saath.
+  // Master switch: one button that applies to all teachers at once.
   void _showMasterSwitch() {
     showDialog(
       context: context,
@@ -3029,7 +2993,7 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
                           !snapshot.hasData) {
                         return const Center(child: CircularProgressIndicator());
                       }
-                      // Chhupa hua admin department list mein nahi dikhana.
+                      // Do not show the hidden admin in the department list.
                       final docs = (snapshot.data?.docs ?? [])
                           .where((d) => d.id != kHiddenAdminDeptName)
                           .toList();
@@ -3088,9 +3052,7 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
   }
 }
 
-// =====================================================================
-// SECTIONS SCREEN: Department -> Section A / B / C / D
-// =====================================================================
+// Sections screen: Department -> Section A / B / C / D
 class SectionsScreen extends StatelessWidget {
   final String deptId;
   final String deptName;
@@ -3149,9 +3111,7 @@ class SectionsScreen extends StatelessWidget {
   }
 }
 
-// =====================================================================
-// SEMESTERS SCREEN: Section -> Semester (default 1..8, naam edit ho sakta hai)
-// =====================================================================
+// Semesters screen: Section -> Semester (default 1 to 8, names can be edited)
 class SemestersScreen extends StatelessWidget {
   final String deptId;
   final String deptName;
@@ -3288,10 +3248,9 @@ class SemestersScreen extends StatelessWidget {
   }
 }
 
-// =====================================================================
-// SUBJECTS SCREEN (department + section + semester ke subjects)
-// Admin: add/delete/open. Teacher: claim / unclaim / open (sirf apna).
-// =====================================================================
+// Subjects screen (subjects of one department, section and semester)
+// Admin: add / delete / open. Teacher: claim / unclaim / open (own subjects
+// only).
 class SubjectsScreen extends StatelessWidget {
   final String deptName;
   final SemRef sem;
@@ -3349,7 +3308,7 @@ class SubjectsScreen extends StatelessWidget {
             onPressed: () {
               final name = nameController.text.trim().toUpperCase();
               if (name.isEmpty || name.contains('/')) return;
-              // merge: taaki same naam dobara add karne par claim na mit jaye
+              // merge, so adding the same name again does not erase the claim
               unawaited(sem.subjectDoc(name).set(
                   {'name': name}, SetOptions(merge: true)).catchError((_) {}));
               unawaited(LocalDb.upsertSubject(sem, name));
@@ -3506,9 +3465,7 @@ class SubjectsScreen extends StatelessWidget {
   }
 }
 
-// =====================================================================
-// MY SUBJECTS (teacher ke claim kiye hue subjects, poore context ke saath)
-// =====================================================================
+// My subjects (subjects the teacher has claimed, with full context)
 class SemLabelText extends StatelessWidget {
   final SemRef sem;
   final TextStyle? style;
@@ -3527,10 +3484,8 @@ class SemLabelText extends StatelessWidget {
   }
 }
 
-// =====================================================================
-// TEACHER HOME: only the subjects this teacher has claimed.
-// The full Department list lives behind the "Claim Subject" icon.
-// =====================================================================
+// Teacher home: only the subjects this teacher has claimed.
+// The full department list is behind the "Claim Subject" icon.
 class TeacherHomeScreen extends StatefulWidget {
   const TeacherHomeScreen({super.key});
 
@@ -3568,8 +3523,9 @@ class _TeacherHomeScreenState extends State<TeacherHomeScreen> {
   Future<void> _open(BuildContext context, SemRef sem, String subject) async {
     final snap = await safeGetDocOrNull(sem.subjectDoc(subject));
     final cb = (snap?.data()?['claimed_by'] ?? '').toString();
-    // Drop the entry ONLY when the server confirmed it is gone / reassigned.
-    // Offline (or unreadable) we simply open it, never remove a claim.
+    // Remove the entry only if the server confirms the subject is gone or
+    // reassigned. When offline (or unreadable), just open it and never remove a
+    // claim.
     final lost = snap != null &&
         !snap.metadata.isFromCache &&
         (!snap.exists || cb != AppSession.teacherId);
@@ -3711,7 +3667,7 @@ class _TeacherHomeScreenState extends State<TeacherHomeScreen> {
                 'subject': (d.data()['subject'] ?? '').toString(),
               }
           ];
-          // Nothing in the Firestore cache? use the SQLite copy of the claims.
+          // Nothing in the Firestore cache? Use the SQLite copy of the claims.
           if (items.isEmpty && (snap == null || snap.metadata.isFromCache)) {
             return FutureBuilder<List<Map<String, String>>>(
               future: LocalDb.claimsOf(AppSession.teacherId),
@@ -3728,13 +3684,10 @@ class _TeacherHomeScreenState extends State<TeacherHomeScreen> {
   }
 }
 
-// =====================================================================
-// IMPORT STUDENTS (Excel .xlsx / CSV / TXT)
-// File mein sirf naam hone chahiye. Roll numbers file ke order mein
-// khud ban jate hain: pehla naam = 1, doosra = 2, teesra = 3 ...
-// Admin (semester master list) aur Teacher (subject list) dono yahi
-// helpers use karte hain.
-// =====================================================================
+// Import students (Excel .xlsx / CSV / TXT)
+// The file only needs names. Roll numbers are made in file order: the first
+// name gets 1, the second 2, and so on. Both the admin (semester master list)
+// and the teacher (subject list) use these helpers.
 final RegExp _importLetterRe = RegExp(r'\p{L}', unicode: true);
 
 void _importSnack(BuildContext context, String msg) {
@@ -3795,8 +3748,8 @@ List<List<String>> _parseCsvText(String text) {
   return rows;
 }
 
-// excel package ke alag versions mein cell value ka type alag hai,
-// isliye dynamic se text nikalte hain.
+// The cell value type is different in different versions of the excel package,
+// so we read it as dynamic and convert it to text.
 String _excelCellText(dynamic data) {
   try {
     final v = data?.value;
@@ -3837,7 +3790,7 @@ List<String> _namesFromRows(List<List<String>> rows) {
     if (nameCol >= 0) {
       if (nameCol < r.length) name = r[nameCol];
     } else {
-      // Roll / serial number wale numeric cells chhod kar pehla naam wala cell.
+      // Skip numeric roll / serial-number cells and take the first name cell.
       for (final c in r) {
         if (_importLetterRe.hasMatch(c)) {
           name = c;
@@ -3851,7 +3804,7 @@ List<String> _namesFromRows(List<List<String>> rows) {
   return out;
 }
 
-// File chuno aur uske andar se naam ki list nikalo. Error par null.
+// Pick a file and read the list of names from it. Returns null on error.
 Future<List<String>?> pickStudentNamesFromFile(BuildContext context) async {
   PlatformFile? f;
   try {
@@ -3861,6 +3814,7 @@ Future<List<String>?> pickStudentNamesFromFile(BuildContext context) async {
     );
   } catch (e) {
     debugPrint('File picker error: $e');
+    if (!context.mounted) return null;
     _importSnack(context, 'Could not open the file picker.');
     return null;
   }
@@ -3871,6 +3825,7 @@ Future<List<String>?> pickStudentNamesFromFile(BuildContext context) async {
     bytes = await f.readAsBytes();
   } catch (_) {}
   if (bytes == null) {
+    if (!context.mounted) return null;
     _importSnack(context, 'Could not read the selected file.');
     return null;
   }
@@ -3901,19 +3856,22 @@ Future<List<String>?> pickStudentNamesFromFile(BuildContext context) async {
     }
   } catch (e) {
     debugPrint('Import parse error: $e');
+    if (!context.mounted) return null;
     _importSnack(context,
         'Could not read this file. Please use .xlsx, .csv or .txt (old .xls is not supported).');
     return null;
   }
 
   if (names.isEmpty) {
+    if (!context.mounted) return null;
     _importSnack(context, 'No student names found in this file.');
     return null;
   }
   return names;
 }
 
-// Confirm dialog. Return: pehle student ka roll number (default 1) ya null.
+// Confirm dialog. Returns the roll number of the first student (default 1), or
+// null.
 Future<int?> confirmStudentImport(
     BuildContext context, List<String> names, String where) {
   final startCtrl = TextEditingController(text: '1');
@@ -3967,9 +3925,7 @@ Future<int?> confirmStudentImport(
   );
 }
 
-// =====================================================================
-// MANAGE STUDENTS SCREEN (admin: is semester ki master student list)
-// =====================================================================
+// Manage students screen (admin: master student list of this semester)
 class ManageStudentsScreen extends StatelessWidget {
   final SemRef sem;
   final String semLabel;
@@ -4013,9 +3969,9 @@ class ManageStudentsScreen extends StatelessWidget {
               final name = nameController.text.trim();
               if (roll.isEmpty || name.isEmpty) return;
 
-              // Edit: wahi student (existingRoll = uska key). Add: agar yeh
-              // roll pehle se hai to naya unique key banta hai - purane
-              // student par kuch overwrite nahi hota.
+              // Edit: the same student (existingRoll is its key). Add: if the
+              // roll already exists, a new unique key is created and the old
+              // student is not overwritten.
               String key = existingRoll ?? roll;
               if (!isEditing) {
                 final existing = await loadSemesterStudents(sem);
@@ -4108,7 +4064,8 @@ class ManageStudentsScreen extends StatelessWidget {
     var batch = FirebaseFirestore.instance.batch();
     var ops = 0;
     for (var i = 0; i < names.length; i++) {
-      // Roll pehle se ho to naya unique key banta hai - kuch overwrite nahi hota.
+      // If the roll already exists, a new unique key is created and nothing is
+      // overwritten.
       final key = uniqueStudentKey((start + i).toString(), taken);
       taken.add(key);
       batch.set(sem.students.doc(key), {'roll': key, 'name': names[i]});
@@ -4120,6 +4077,7 @@ class ManageStudentsScreen extends StatelessWidget {
       }
     }
     if (ops > 0) unawaited(batch.commit().catchError((_) {}));
+    if (!context.mounted) return;
     _importSnack(context,
         '${names.length} student${names.length == 1 ? '' : 's'} imported (roll $start to ${start + names.length - 1})');
   }
@@ -4251,11 +4209,9 @@ class RollBadge extends StatelessWidget {
   }
 }
 
-// =====================================================================
-// SUBJECT STUDENTS (sirf is subject ke liye add / "remove")
-// Remove = soft remove: admin ki master list se student delete nahi hota,
-// bas is subject ki list mein nahi dikhta.
-// =====================================================================
+// Subject students (add / "remove" for this subject only)
+// Remove is a soft remove: the student is not deleted from the admin's master
+// list, just hidden from this subject's list.
 class SubjectStudentsScreen extends StatefulWidget {
   final SemRef sem;
   final String subjectName;
@@ -4269,7 +4225,7 @@ class SubjectStudentsScreen extends StatefulWidget {
 class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
   bool _loading = true;
   Map<String, String> _master = {};
-  // roll -> {'name':..., 'kind': 'extra'|'hidden'}
+  // roll -> {'name': ..., 'kind': 'extra' | 'hidden'}
   Map<String, Map<String, String>> _overrides = {};
 
   @override
@@ -4335,7 +4291,8 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
               final typedRoll = rollController.text.trim();
               final name = nameController.text.trim();
               if (typedRoll.isEmpty || name.isEmpty) return;
-              // Same roll pehle se ho (master / extra / hidden) to unique key.
+              // If the same roll already exists (master / extra / hidden),
+              // create a unique key.
               final roll = uniqueStudentKey(
                   typedRoll, [..._master.keys, ..._overrides.keys]);
               final sem = widget.sem;
@@ -4406,7 +4363,7 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
               final sem = widget.sem;
               final sub = widget.subjectName;
               if (_master.containsKey(roll)) {
-                // master list wala student: "hidden" marker lagao
+                // Student from the master list: add a "hidden" marker
                 unawaited(sem.overrides(sub).doc(roll).set({
                   'roll': roll,
                   'name': name,
@@ -4415,7 +4372,7 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
                 unawaited(LocalDb.upsertOverride(sem, sub, roll, name, 'hidden'));
                 setState(() => _overrides[roll] = {'name': name, 'kind': 'hidden'});
               } else {
-                // sirf is subject mein add kiya gaya student: override hata do
+                // Student added only to this subject: remove the override
                 unawaited(sem.overrides(sub).doc(roll).delete().catchError((_) {}));
                 unawaited(LocalDb.deleteOverride(sem, sub, roll));
                 setState(() => _overrides.remove(roll));
@@ -4499,11 +4456,9 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
   }
 }
 
-// =====================================================================
-// TIME PICKER (sirf 6:00 AM se 6:00 PM tak)
-// Flutter ka default picker range restrict nahi kar sakta, isliye
-// apna chhota dialog: ghanta 6 AM–6 PM, 6 PM par sirf :00.
-// =====================================================================
+// Time picker (6:00 AM to 6:00 PM only)
+// Flutter's default picker cannot limit the range, so this is a small custom
+// dialog: hours from 6 AM to 6 PM, and only :00 at 6 PM.
 Future<TimeOfDay?> pickClassTime(BuildContext context, TimeOfDay? initial) {
   int hour = (initial?.hour ?? 9).clamp(kPickerStartHour, kPickerEndHour).toInt();
   int minute = initial?.minute ?? 0;
@@ -4573,12 +4528,10 @@ Future<TimeOfDay?> pickClassTime(BuildContext context, TimeOfDay? initial) {
   );
 }
 
-// =====================================================================
-// IMPORT OLD ATTENDANCE (Excel .xlsx / CSV) -> Subject Attendance
-// File ka layout: upar dates ki row, left mein student ke naam, naam ke
-// aage har date ke neeche P / A. Har date = ek session record.
-// Is app ka apna exported Excel bhi seedha import ho jata hai.
-// =====================================================================
+// Import old attendance (Excel .xlsx / CSV) into a subject's attendance
+// Expected layout: a row of dates on top, student names on the left, and P / A
+// under each date. Each date becomes one session record. Excel files exported
+// by this app can be imported directly.
 class ImportColumn {
   final int col;
   final DateTime date;
@@ -4590,7 +4543,7 @@ class ImportColumn {
 
 class ImportRow {
   final String name;
-  final String roll; // file ka roll (sirf agar 'Roll' header wala column ho)
+  final String roll; // roll from the file (only if there is a 'Roll' column)
   final Map<int, String> status; // column index -> 'P' / 'A'
   ImportRow(this.name, this.roll, this.status);
 }
@@ -4603,8 +4556,8 @@ class ImportSheet {
 
 class ImportPlan {
   final Map<int, String> rowToStudent; // file row index -> student key
-  final Set<int> cols; // jo date columns import karne hain
-  final bool blankPresent; // khaali cell = Present (warna Absent)
+  final Set<int> cols; // date columns to import
+  final bool blankPresent; // blank cell = Present (otherwise Absent)
   ImportPlan(this.rowToStudent, this.cols, this.blankPresent);
 }
 
@@ -4621,10 +4574,9 @@ DateTime? _importMakeDate(int y, int m, int d) {
   return dt;
 }
 
-// true = 12/09/2025 matlab 12 Sep (din pehle); false = 12/09/2025 matlab Dec 9.
-// parseAttendanceSheet poori sheet dekh kar ye khud set karta hai.
+// true: 12/09/2025 means 12 Sep (day first). false: it means Dec 9.
+// parseAttendanceSheet sets this by looking at the whole sheet.
 bool _importDayFirst = true;
-String _importWhy = '';
 
 bool _inferDayFirst(List<List<String>> g) {
   var df = 0, mf = 0;
@@ -4645,7 +4597,8 @@ bool _inferDayFirst(List<List<String>> g) {
   return mf <= df;
 }
 
-// Cell text se date nikalta hai. Numeric formats mein pehle din (dd/mm/yyyy).
+// Reads a date from cell text. Numeric formats are treated as day first
+// (dd/mm/yyyy).
 DateTime? _parseImportDate(String raw) {
   var s = raw.trim();
   if (s.isEmpty) return null;
@@ -4667,7 +4620,7 @@ DateTime? _parseImportDate(String raw) {
   s = s.replaceAll(RegExp(r'\s+'), ' ').trim();
   if (s.isEmpty) return null;
 
-  // 2025-09-12 (aage time ho to bhi chalega)
+  // 2025-09-12 (a time after it is fine too)
   var m = RegExp(r'^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)').firstMatch(s);
   if (m != null) {
     return _importMakeDate(int.parse(m.group(1)!), int.parse(m.group(2)!),
@@ -4721,7 +4674,7 @@ DateTime? _parseImportDate(String raw) {
   return null;
 }
 
-// 'P' / 'A' ya null (khaali ya samajh na aaye).
+// 'P' / 'A', or null (blank or not understood).
 String? _parseImportStatus(String raw) {
   var s = raw.trim().toLowerCase();
   if (s.isEmpty) return null;
@@ -4731,7 +4684,7 @@ String? _parseImportStatus(String raw) {
     if (n == 0) return 'A';
     return null;
   }
-  // "P.", "(P)", "Pre sent" -> punctuation / spaces hata do
+  // "P.", "(P)", "Pre sent" -> remove punctuation and spaces
   s = s.replaceAll(RegExp(r'[\s.\-_()\[\]]+'), '');
   if (s.isEmpty) return null;
   const present = {
@@ -4749,7 +4702,7 @@ String? _parseImportStatus(String raw) {
   return null;
 }
 
-// Excel cell ka text; date cells ko yyyy-MM-dd bana deta hai.
+// Text of an Excel cell. Date cells become yyyy-MM-dd.
 String _importCellText(dynamic data) {
   try {
     final inner = (data?.value) as dynamic;
@@ -4775,12 +4728,9 @@ String _importCellText(dynamic data) {
   return _excelCellText(data);
 }
 
-// ---------------------------------------------------------------------
-// Fallback XLSX reader. 'excel' package WPS / Google Sheets / mobile apps
-// ki files par aksar crash karta hai ("not found" / null error).
-// Ye seedha zip ke andar ka XML padh leta hai, isliye har tarah ki
-// .xlsx khulti hai.
-// ---------------------------------------------------------------------
+// Fallback XLSX reader. The 'excel' package often crashes on files from WPS,
+// Google Sheets and mobile apps ("not found" / null error). This reads the XML
+// inside the zip directly, so every kind of .xlsx opens.
 String _xmlUnescape(String s) => s
     .replaceAll('&lt;', '<')
     .replaceAll('&gt;', '>')
@@ -4952,7 +4902,7 @@ List<List<List<String>>> _rawXlsxGrids(Uint8List bytes) {
   return out;
 }
 
-// Excel package + fallback reader dono se saari sheets ki grids.
+// Grids of all sheets, from the excel package and the fallback reader.
 List<List<List<String>>> _allXlsxGrids(Uint8List bytes,
     {required bool forAttendance}) {
   final out = <List<List<String>>>[];
@@ -4977,15 +4927,13 @@ List<List<List<String>>> _allXlsxGrids(Uint8List bytes,
   return out;
 }
 
-// =====================================================================
-// parseAttendanceSheet  (layout-agnostic)
-// Teen layouts khud pehchanta hai aur jiska P/A count sabse zyada ho wahi leta hai:
-//   1) WIDE       : dates ek row mein, student naam ek column mein (P/A neeche)
-//   2) TRANSPOSED : dates ek column mein, student naam upar ki row mein
-//   3) LONG       : har row = Date | Name | Status (koi bhi column order)
-// Column order, extra columns, status ke alfaaz (P/Present/1/✓ ...) se farq nahi padta.
-// ImportColumn.col sirf ek unique id hai, isliye har layout ke liye chalta hai.
-// =====================================================================
+// parseAttendanceSheet (works with any layout)
+// Detects three layouts by itself and uses the one with the most P/A entries:
+//   1) WIDE       : dates in one row, student names in one column (P/A below)
+//   2) TRANSPOSED : dates in one column, student names in the top row
+//   3) LONG       : each row = Date | Name | Status (any column order)
+// Column order, extra columns and status wording (P / Present / 1 / ...) do not
+// matter. ImportColumn.col is just a unique id, so it works for every layout.
 class _ImportHeader {
   final int row;
   final Map<int, DateTime> dates;
@@ -5073,7 +5021,8 @@ _ImportHeader? _importHeaderFromRow(List<List<String>> g, int r) {
   return dates.isEmpty ? null : _ImportHeader(r, dates);
 }
 
-// Title / header se [year, month] nikalta hai (e.g. "September 2025", "09/2025").
+// Gets [year, month] from the title or header (e.g. "September 2025",
+// "09/2025").
 List<int>? _importFindMonthYear(List<List<String>> g, int upToRow) {
   final monthRe = RegExp(
       r"\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)\b(?:[\s,.\-/']*(20\d{2}))?",
@@ -5118,7 +5067,8 @@ List<int>? _importFindMonthYear(List<List<String>> g, int upToRow) {
   return null;
 }
 
-// Header row jismein sirf din ke number hon (1 2 3 ... 31) + upar month/year.
+// A header row with only day numbers (1 2 3 ... 31), with the month and year
+// above it.
 _ImportHeader? _importDayNumberHeader(List<List<String>> g, int limit) {
   final dayRe = RegExp(r'^(\d{1,2})$');
   for (var r = 0; r < limit; r++) {
@@ -5173,7 +5123,7 @@ _ImportHeader? _importFindDateHeader(List<List<String>> g) {
   return null;
 }
 
-// ---- Layout 1: dates upar, naam left (ya kahin bhi) ----
+// ---- Layout 1: dates on top, names on the left (or anywhere) ----
 _ImportDraft? _importParseWide(List<List<String>> g) {
   final nR = g.length;
   final nC = nR == 0 ? 0 : g[0].length;
@@ -5188,7 +5138,8 @@ _ImportDraft? _importParseWide(List<List<String>> g) {
   final dateKeys = dates.keys.toList()..sort();
   final firstDateCol = dateKeys.first;
 
-  // Naam ka column: header mein 'name', warna sabse zyada (non-status) text.
+  // Name column: the one with 'name' in its header, otherwise the one with the
+  // most text (not status).
   var nameCol = -1;
   var bestScore = 0.0;
   for (var c = 0; c < nC; c++) {
@@ -5223,7 +5174,7 @@ _ImportDraft? _importParseWide(List<List<String>> g) {
   }
   if (nameCol < 0) return null;
 
-  // Roll column: sirf agar header mein roll / reg / enrol / admission ho.
+  // Roll column: only if the header has roll / reg / enrol / admission.
   var rollCol = -1;
   for (var c = 0; c < nC && rollCol < 0; c++) {
     if (c == nameCol || dates.containsKey(c)) continue;
@@ -5250,8 +5201,8 @@ _ImportDraft? _importParseWide(List<List<String>> g) {
   }
   if (nameRows.isEmpty) return null;
 
-  // Merged date header (ek date ke neeche kai session columns): khaali header
-  // wale agle columns, agar unmein P/A hai, usi date ke maane jate hain.
+  // Merged date header (several session columns under one date): the blank
+  // header cells that follow, if they have P/A, belong to the same date.
   final colDate = Map<int, DateTime>.from(dates);
   for (final c in dateKeys) {
     for (var k = c + 1; k < nC; k++) {
@@ -5266,8 +5217,8 @@ _ImportDraft? _importParseWide(List<List<String>> g) {
     }
   }
 
-  // Session numbers: header ke aas-paas "Session 2" ho to wahi, warna
-  // ek hi date baar-baar aaye to 1, 2, 3...
+  // Session numbers: use "Session 2" if the header has it, otherwise count 1,
+  // 2, 3 when the same date repeats.
   final allCols = colDate.keys.toList()..sort();
   final used = <String>{};
   final counter = <String, int>{};
@@ -5311,7 +5262,7 @@ _ImportDraft? _importParseWide(List<List<String>> g) {
   return _ImportDraft(keepCols, outRows);
 }
 
-// ---- Layout 3: har row = Date | Name | Status ----
+// ---- Layout 3: each row = Date | Name | Status ----
 _ImportDraft? _importParseLong(List<List<String>> g) {
   final nR = g.length;
   final nC = nR == 0 ? 0 : g[0].length;
@@ -5331,7 +5282,7 @@ _ImportDraft? _importParseLong(List<List<String>> g) {
     }
   }
   int argmax(List<int> v, int skip1, int skip2) {
-    var bi = -1, bv = 1; // kam se kam 2
+    var bi = -1, bv = 1; // at least 2
     for (var c = 0; c < v.length; c++) {
       if (c == skip1 || c == skip2) continue;
       if (v[c] > bv) {
@@ -5462,8 +5413,9 @@ String _sortedImportName(String s) {
   return t.join(' ');
 }
 
-// File ke naam <-> app ke students. Sirf pakke match (poora naam, ya wahi
-// lafz aage-peeche, ya roll number). Baaki sab user ko dikhte hain.
+// Match file names to the app's students. Only sure matches count (full name,
+// the same words in a different order, or the roll number). Everything else is
+// shown to the user.
 Map<int, String> autoMatchImportRows(
     List<ImportRow> rows, List<Map<String, String>> students) {
   final result = <int, String>{};
@@ -5492,7 +5444,7 @@ Map<int, String> autoMatchImportRows(
   return result;
 }
 
-// File chuno aur parse karo. Error par null (snackbar dikha deta hai).
+// Pick a file and parse it. Returns null on error (a snackbar is shown).
 Future<ImportSheet?> pickAttendanceSheetFromFile(BuildContext context) async {
   PlatformFile? f;
   try {
@@ -5502,6 +5454,7 @@ Future<ImportSheet?> pickAttendanceSheetFromFile(BuildContext context) async {
     );
   } catch (e) {
     debugPrint('File picker error: $e');
+    if (!context.mounted) return null;
     _importSnack(context, 'Could not open the file picker.');
     return null;
   }
@@ -5512,6 +5465,7 @@ Future<ImportSheet?> pickAttendanceSheetFromFile(BuildContext context) async {
     bytes = await f.readAsBytes();
   } catch (_) {}
   if (bytes == null) {
+    if (!context.mounted) return null;
     _importSnack(context, 'Could not read the selected file.');
     return null;
   }
@@ -5543,17 +5497,20 @@ Future<ImportSheet?> pickAttendanceSheetFromFile(BuildContext context) async {
     }
   } catch (e) {
     debugPrint('Attendance import parse error: $e');
+    if (!context.mounted) return null;
     _importSnack(context, 'Could not read this file: $e');
     return null;
   }
 
   if (!anyGrid) {
+    if (!context.mounted) return null;
     _importSnack(context,
         'Could not read this file. Please use .xlsx or .csv (old .xls is not supported - open it and Save As .xlsx).');
     return null;
   }
 
   if (sheet == null) {
+    if (!context.mounted) return null;
     _importSnack(context,
         'No attendance found. The file needs a row of dates on top and student names on the left with P / A under each date.');
     return null;
@@ -5561,10 +5518,8 @@ Future<ImportSheet?> pickAttendanceSheetFromFile(BuildContext context) async {
   return sheet;
 }
 
-// ---------------------------------------------------------------------
-// Review screen: kya import hoga, kaun se naam match nahi hue.
-// Unmatched naam user khud kisi student se jod sakta hai (ya skip).
-// ---------------------------------------------------------------------
+// Review screen: shows what will be imported and which names did not match. The
+// user can link an unmatched name to a student, or skip it.
 class ImportReviewScreen extends StatefulWidget {
   final ImportSheet sheet;
   final List<Map<String, String>> students;
@@ -5777,12 +5732,10 @@ class _ImportReviewScreenState extends State<ImportReviewScreen> {
   }
 }
 
-// =====================================================================
-// SUBJECT ATTENDANCE SCREEN
-// Admin: koi restriction nahi. Teacher: master switch OFF ho to sirf
-// aaj ki date, har ghante ke pehle 20 minute, sirf naya record; ON ho
-// to sab kuch khula. Har subject ki screen alag-alag hai.
-// =====================================================================
+// Subject attendance screen
+// Admin: no restrictions. Teacher: with the master switch OFF, only today's
+// date, only in the first 20 minutes of each hour, and only a new record. With
+// the switch ON, everything is open. Each subject has its own screen.
 class SubjectAttendanceScreen extends StatefulWidget {
   final SemRef sem;
   final String semLabel;
@@ -5815,8 +5768,8 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
   String? timeStr; // 'HH:mm'
   Map<String, String> existingMeta = {};
 
-  // All records of this subject, loaded ONCE (one read), then used for
-  // the selected date, previous-session copy and percentages.
+  // All records of this subject, loaded once (one read), then used for the
+  // selected date, copying the previous session, and the percentages.
   List<DateRecord> _records = [];
 
   bool masterOn = false;
@@ -5849,7 +5802,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       if (mounted && on != masterOn) setState(() => masterOn = on);
     }, onError: (_) {});
 
-    // Window open/close ko screen par update karne ke liye
+    // Update the screen when the window opens or closes
     _ticker = Timer.periodic(const Duration(seconds: 15), (_) {
       if (mounted && !_isAdmin) setState(() {});
     });
@@ -5963,7 +5916,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
   }
 
   void _saveAttendance() async {
-    // Save ke waqt rules dobara check (window beech mein band ho sakti hai)
+    // Check the rules again when saving (the window may have closed meanwhile)
     if (!_canEdit) {
       showSnack(
           context,
@@ -5980,14 +5933,14 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       for (final s in students) s['roll']!: attendanceStatus[s['roll']!] ?? 'P',
     };
 
-    // Time: admin / (master ON wala) teacher apna chuna hua time de sakta
-    // hai; warna abhi ka time.
+    // Time: an admin (or a teacher when the master switch is ON) can pick their
+    // own time. Otherwise use the current time.
     String? time = _unrestricted ? timeStr : hhmm(TimeOfDay.now());
     if (time == null && !existingRecord) time = hhmm(TimeOfDay.now());
     if (time != null) data['_time'] = time;
 
-    // Kisne mark ki: admin kisi teacher ka record edit kare to original
-    // teacher ka naam bana rehta hai.
+    // Who marked it: if an admin edits a teacher's record, the original
+    // teacher's name stays.
     String byId = AppSession.userId;
     String byName = AppSession.userName;
     if (_isAdmin && (existingMeta['_marked_by'] ?? '').isNotEmpty) {
@@ -6001,7 +5954,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       for (final s in students) s['roll']!: attendanceStatus[s['roll']!] ?? 'P',
     };
 
-    // await nahi: offline me ye kabhi complete nahi hota.
+    // Not awaited: this never completes while offline.
     unawaited(_datesRef.doc(docId).set(data).catchError((_) {}));
     unawaited(LocalDb.saveAttendance(
       widget.sem,
@@ -6062,9 +6015,9 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
   }
 
   // ---- Import old attendance from Excel / CSV ----
-  // Admin aur teacher dono ke liye. Purani dates ka data hai, isliye
-  // time-window / "sirf aaj" rule yahan lagu nahi. Lekin jis session ka
-  // record pehle se hai, use sirf admin (ya master switch ON) badal sakta hai.
+  // For both admin and teacher. This is old-date data, so the time window and
+  // "today only" rules do not apply. But an existing session record can be
+  // changed only by the admin (or when the master switch is ON).
   Future<void> _importFromFile() async {
     if (students.isEmpty) {
       showSnack(context, 'Add students to this subject first.', color: kAbsent);
@@ -6120,7 +6073,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
         '_marked_by_name': byName,
       };
 
-      // await nahi: offline me ye kabhi complete nahi hota.
+      // Not awaited: this never completes while offline.
       unawaited(_datesRef.doc(docId).set(data).catchError((_) {}));
       await LocalDb.saveAttendance(
         widget.sem,
@@ -6176,7 +6129,10 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       ..createSync(recursive: true)
       ..writeAsBytesSync(fileBytes!);
 
-    await Share.shareXFiles([XFile(filePath)], text: '${widget.subjectName} Attendance Report');
+    await SharePlus.instance.share(ShareParams(
+      files: [XFile(filePath)],
+      text: '${widget.subjectName} Attendance Report',
+    ));
   }
 
   Widget _restrictionBanner() {
@@ -6511,10 +6467,8 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
   }
 }
 
-// =====================================================================
-// MANAGE ATTENDANCE SCREEN (purane records edit/delete)
-// Sirf admin, ya teacher jab master switch ON ho.
-// =====================================================================
+// Manage attendance screen (edit / delete old records)
+// Admin only, or a teacher when the master switch is ON.
 class ManageAttendanceScreen extends StatelessWidget {
   final SemRef sem;
   final String semLabel;
@@ -6655,11 +6609,9 @@ class ManageAttendanceScreen extends StatelessWidget {
   }
 }
 
-// =====================================================================
-// STUDENT STATUS CARD (shared by Subject Stats and Monthly Attendance;
-// admin + teacher). Compact, everything centered, no overflow: all text
-// sits in a Column / Expanded cells so nothing can run out of the card.
-// =====================================================================
+// Student status card (shared by Subject Stats and Monthly Attendance, for
+// admin and teacher). Compact and centered. All text sits in a Column /
+// Expanded cell so nothing can overflow the card.
 class StatEntry {
   final String label;
   final bool present;
@@ -6864,9 +6816,7 @@ StudentStatCard buildStudentStatCard(
   );
 }
 
-// =====================================================================
-// SUBJECT STATS SCREEN (overall; admin + teacher)
-// =====================================================================
+// Subject stats screen (overall, for admin and teacher)
 class SubjectStatsScreen extends StatefulWidget {
   final SemRef sem;
   final String subjectName;
@@ -6932,11 +6882,9 @@ class _SubjectStatsScreenState extends State<SubjectStatsScreen> {
   }
 }
 
-// =====================================================================
-// MONTHLY ATTENDANCE (admin + teacher): pick a month, see only that
-// month's attendance of this subject. Read from the local SQLite
-// database (works offline); when online it is refreshed first.
-// =====================================================================
+// Monthly attendance (admin and teacher): pick a month and see only that
+// month's attendance of this subject. It is read from the local SQLite database
+// (works offline) and refreshed first when online.
 class MonthlyAttendanceScreen extends StatefulWidget {
   final SemRef sem;
   final String semLabel;
@@ -7061,7 +7009,8 @@ class _MonthlyAttendanceScreenState extends State<MonthlyAttendanceScreen> {
     if (picked != null) await _setMonth(picked);
   }
 
-  // ---- Excel export of the selected month (admin + teacher, every subject) ----
+  // ---- Excel export of the selected month (admin and teacher, every subject)
+  // ----
   bool _exporting = false;
 
   Future<void> _exportExcel() async {
@@ -7087,11 +7036,11 @@ class _MonthlyAttendanceScreenState extends State<MonthlyAttendanceScreen> {
         ..createSync(recursive: true)
         ..writeAsBytesSync(bytes);
 
-      await Share.shareXFiles(
-        [XFile(path)],
+      await SharePlus.instance.share(ShareParams(
+        files: [XFile(path)],
         text:
             '${widget.subjectName} - ${DateFormat('MMMM yyyy').format(_month)} Attendance',
-      );
+      ));
     } catch (e) {
       debugPrint('Monthly Excel export error: $e');
       if (mounted) {
