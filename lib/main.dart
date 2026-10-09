@@ -711,13 +711,13 @@ class WelcomeScreen extends StatelessWidget {
                             fontWeight: FontWeight.w800,
                             letterSpacing: 10)),
                     const SizedBox(height: 8),
-                    Text('डिपार्टमेंट और अटेंडेंस, एक ही जगह',
+                    Text('Smart Attendance',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                             color: kAccent.withValues(alpha: 0.95),
-                            fontSize: 15,
-                            fontWeight: FontWeight.w300,
-                            letterSpacing: 1.2)),
+                            fontSize: 16,
+                            fontWeight: FontWeight.w500,
+                            letterSpacing: 3)),
                     const SizedBox(height: 36),
                     SizedBox(
                       width: double.infinity,
@@ -2753,6 +2753,7 @@ Future<void> restoreFromBackupUi(BuildContext context) async {
     }
     return;
   }
+  if (!context.mounted) return;
 
   showDialog(
     context: context,
