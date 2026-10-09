@@ -35,6 +35,8 @@ void main() async {
   if (kIsWeb) {
     sql.databaseFactory = databaseFactoryFfiWeb;
   }
+  // Read the saved login while Firebase starts (saves start-up time).
+  final sessionReady = AppSession.restore();
   await Firebase.initializeApp(
     options: const FirebaseOptions(
       apiKey: "AIzaSyBlokxXBdPiOPCC0P6P7DtS72tSruzJcHk",
@@ -54,7 +56,7 @@ void main() async {
     cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
   );
 
-  await AppSession.restore();
+  await sessionReady;
   runApp(const AttendanceApp());
 }
 
@@ -121,6 +123,22 @@ class AuroraBackground extends StatelessWidget {
   }
 }
 
+// Light page transition for the web (a plain fade).
+class _WebFadeTransitions extends PageTransitionsBuilder {
+  const _WebFadeTransitions();
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    return FadeTransition(opacity: animation, child: child);
+  }
+}
+
 // Pages are transparent, so every route gets its own gradient. This stops the
 // previous page from showing through while a page slides in.
 class _AuroraTransitions extends PageTransitionsBuilder {
@@ -172,22 +190,38 @@ class AttendanceApp extends StatelessWidget {
         scaffoldBackgroundColor: Colors.transparent,
         canvasColor: kSurface,
         dividerColor: kOutline,
-        pageTransitionsTheme: const PageTransitionsTheme(
-          builders: {
-            TargetPlatform.android:
-                _AuroraTransitions(ZoomPageTransitionsBuilder()),
-            TargetPlatform.iOS:
-                _AuroraTransitions(CupertinoPageTransitionsBuilder()),
-            TargetPlatform.macOS:
-                _AuroraTransitions(CupertinoPageTransitionsBuilder()),
-            TargetPlatform.windows:
-                _AuroraTransitions(ZoomPageTransitionsBuilder()),
-            TargetPlatform.linux:
-                _AuroraTransitions(ZoomPageTransitionsBuilder()),
-            TargetPlatform.fuchsia:
-                _AuroraTransitions(ZoomPageTransitionsBuilder()),
-          },
-        ),
+        pageTransitionsTheme: kIsWeb
+            ? const PageTransitionsTheme(
+                builders: {
+                  TargetPlatform.android:
+                      _AuroraTransitions(_WebFadeTransitions()),
+                  TargetPlatform.iOS: _AuroraTransitions(_WebFadeTransitions()),
+                  TargetPlatform.macOS:
+                      _AuroraTransitions(_WebFadeTransitions()),
+                  TargetPlatform.windows:
+                      _AuroraTransitions(_WebFadeTransitions()),
+                  TargetPlatform.linux:
+                      _AuroraTransitions(_WebFadeTransitions()),
+                  TargetPlatform.fuchsia:
+                      _AuroraTransitions(_WebFadeTransitions()),
+                },
+              )
+            : const PageTransitionsTheme(
+                builders: {
+                  TargetPlatform.android:
+                      _AuroraTransitions(ZoomPageTransitionsBuilder()),
+                  TargetPlatform.iOS:
+                      _AuroraTransitions(CupertinoPageTransitionsBuilder()),
+                  TargetPlatform.macOS:
+                      _AuroraTransitions(CupertinoPageTransitionsBuilder()),
+                  TargetPlatform.windows:
+                      _AuroraTransitions(ZoomPageTransitionsBuilder()),
+                  TargetPlatform.linux:
+                      _AuroraTransitions(ZoomPageTransitionsBuilder()),
+                  TargetPlatform.fuchsia:
+                      _AuroraTransitions(ZoomPageTransitionsBuilder()),
+                },
+              ),
         appBarTheme: const AppBarTheme(
           backgroundColor: Colors.transparent,
           surfaceTintColor: Colors.transparent,
@@ -359,27 +393,32 @@ class AppCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final r = BorderRadius.circular(radius);
+    final card = Material(
+      color: kGlass,
+      child: InkWell(
+        onTap: onTap,
+        child: Ink(
+          decoration: BoxDecoration(
+            borderRadius: r,
+            border: Border.all(color: kGlassBorder),
+          ),
+          padding: padding,
+          child: child,
+        ),
+      ),
+    );
     return Padding(
       padding: margin,
       child: ClipRRect(
         borderRadius: r,
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
-          child: Material(
-            color: kGlass,
-            child: InkWell(
-              onTap: onTap,
-              child: Ink(
-                decoration: BoxDecoration(
-                  borderRadius: r,
-                  border: Border.all(color: kGlassBorder),
-                ),
-                padding: padding,
-                child: child,
+        // Web: no blur. BackdropFilter per card makes the page slow there, and
+        // on this smooth gradient background the blur is hardly visible anyway.
+        child: kIsWeb
+            ? card
+            : BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
+                child: card,
               ),
-            ),
-          ),
-        ),
       ),
     );
   }
@@ -1410,6 +1449,69 @@ CollectionReference<Map<String, dynamic>> teacherClaimsRef(String teacherId) =>
 DocumentReference<Map<String, dynamic>> permissionsRef() =>
     FirebaseFirestore.instance.collection('settings').doc('permissions');
 
+// ---- Teacher permissions (settings/permissions) ----
+// kPermMaster is the master switch: when ON, teachers can do everything.
+// When it is OFF, each of the detailed permissions below applies on its own.
+// A missing field means "not allowed", so nothing changes for old data.
+const String kPermMaster = 'teachers_unrestricted';
+const String kPermAnytime = 'perm_anytime'; // mark outside the 20-minute window
+const String kPermChangeTime = 'perm_change_time'; // pick the class time
+const String kPermChangeDate = 'perm_change_date'; // pick other / past dates
+const String kPermEdit = 'perm_edit'; // edit existing records
+const String kPermDelete = 'perm_delete'; // delete records
+const List<String> kDetailedPerms = [
+  kPermAnytime,
+  kPermChangeTime,
+  kPermChangeDate,
+  kPermEdit,
+  kPermDelete,
+];
+
+class TeacherPerms {
+  final bool master;
+  final bool anytime;
+  final bool changeTime;
+  final bool changeDate;
+  final bool edit;
+  final bool delete;
+  const TeacherPerms({
+    this.master = false,
+    this.anytime = false,
+    this.changeTime = false,
+    this.changeDate = false,
+    this.edit = false,
+    this.delete = false,
+  });
+
+  static const TeacherPerms none = TeacherPerms();
+
+  factory TeacherPerms.from(Map<String, dynamic>? d) {
+    if (d == null) return none;
+    return TeacherPerms(
+      master: d[kPermMaster] == true,
+      anytime: d[kPermAnytime] == true,
+      changeTime: d[kPermChangeTime] == true,
+      changeDate: d[kPermChangeDate] == true,
+      edit: d[kPermEdit] == true,
+      delete: d[kPermDelete] == true,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is TeacherPerms &&
+      other.master == master &&
+      other.anytime == anytime &&
+      other.changeTime == changeTime &&
+      other.changeDate == changeDate &&
+      other.edit == edit &&
+      other.delete == delete;
+
+  @override
+  int get hashCode =>
+      Object.hash(master, anytime, changeTime, changeDate, edit, delete);
+}
+
 // ---- Old paths (from before sections existed), used only for migration and
 // delete ----
 CollectionReference<Map<String, dynamic>> legacyStudentsRef(String deptId) =>
@@ -1442,6 +1544,10 @@ CollectionReference<Map<String, dynamic>> legacyDatesRef(
 
 // Offline-safe read helpers
 const Duration _kNetworkTimeout = Duration(seconds: 2);
+// Web: do not make every screen wait for the server. After this time the
+// cached copy is shown (the server read keeps running and refreshes the cache).
+const Duration _kReadTimeout =
+    kIsWeb ? Duration(milliseconds: 900) : _kNetworkTimeout;
 
 // Wi-Fi being connected does not always mean the internet works. _netState()
 // adds a quick DNS check (cached for a few seconds). When the phone is
@@ -1512,7 +1618,7 @@ Future<DocumentSnapshot<Map<String, dynamic>>> safeGetDoc(
     final server = ref.get();
     server.ignore();
     try {
-      return await server.timeout(_kNetworkTimeout);
+      return await server.timeout(_kReadTimeout);
     } catch (_) {}
     try {
       return await ref.get(cacheOnly);
@@ -1547,7 +1653,7 @@ Future<QuerySnapshot<Map<String, dynamic>>> safeGetQuery(
     final server = query.get();
     server.ignore();
     try {
-      return await server.timeout(_kNetworkTimeout);
+      return await server.timeout(_kReadTimeout);
     } catch (_) {}
     final cached = await query.get(cacheOnly);
     if (cached.docs.isNotEmpty) return cached;
@@ -3987,37 +4093,89 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
 
   // Master switch: one button that applies to all teachers at once.
   void _showMasterSwitch() {
+    final items = <({String key, String label, IconData icon})>[
+      (key: kPermAnytime, label: 'TIME', icon: Icons.schedule),
+      (key: kPermChangeTime, label: 'SET TIME', icon: Icons.access_time),
+      (key: kPermChangeDate, label: 'DATE', icon: Icons.calendar_today),
+      (key: kPermEdit, label: 'EDIT', icon: Icons.edit_outlined),
+      (key: kPermDelete, label: 'DELETE', icon: Icons.delete_outline),
+    ];
+
+    void setPerms(Map<String, dynamic> m) {
+      unawaited(permissionsRef()
+          .set(m, SetOptions(merge: true))
+          .catchError((_) {}));
+    }
+
     showDialog(
       context: context,
       builder: (dialogContext) =>
           StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
         stream: permissionsRef().snapshots(),
         builder: (ctx, snap) {
-          final on = snap.data?.data()?['teachers_unrestricted'] == true;
+          final d = snap.data?.data() ?? <String, dynamic>{};
+          final on = d[kPermMaster] == true;
           return AlertDialog(
             title: const Text('Teacher permissions'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  value: on,
-                  title: Text(on ? 'Master switch: ON' : 'Master switch: OFF'),
-                  onChanged: (v) {
-                    unawaited(permissionsRef()
-                        .set({'teachers_unrestricted': v}, SetOptions(merge: true))
-                        .catchError((_) {}));
-                  },
+            content: SizedBox(
+              width: double.maxFinite,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: on,
+                      title: Text(on ? 'Master switch: ON' : 'Master switch: OFF'),
+                      subtitle: const Text('ALL',
+                          style: TextStyle(
+                              color: kAccent,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700)),
+                      onChanged: (v) => setPerms({kPermMaster: v}),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      on
+                          ? 'Teachers can mark attendance at any time, add attendance for past dates, edit or delete records, and change the time or session.'
+                          : 'Master switch OFF: turn on the options below one by one to give a teacher only that ability.',
+                      style: const TextStyle(color: kMuted, fontSize: 13),
+                    ),
+                    const Divider(height: 20, color: kOutline),
+                    for (final it in items)
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        secondary: Icon(it.icon, color: kAccent),
+                        value: on || d[it.key] == true,
+                        title: Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: kAccent.withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                it.label,
+                                style: const TextStyle(
+                                    color: kAccent,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700),
+                              ),
+                            ),
+                          ],
+                        ),
+                        subtitle: Text(
+                          _permSubtitle(it.key),
+                          style: const TextStyle(color: kMuted, fontSize: 12),
+                        ),
+                        onChanged: on ? null : (v) => setPerms({it.key: v}),
+                      ),
+                  ],
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  on
-                      ? 'Teachers can mark attendance at any time, add attendance for past dates, edit or delete records, and change the time or session.'
-                      : 'Teachers can only mark attendance within the first 20 minutes of each hour. Past dates, editing, deleting and changing the time or session are disabled.',
-                  style: const TextStyle(color: kMuted, fontSize: 13),
-                ),
-              ],
+              ),
             ),
             actions: [
               TextButton(
@@ -4029,6 +4187,24 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
         },
       ),
     );
+  }
+
+  // Short English explanation shown under each permission's code label.
+  String _permSubtitle(String key) {
+    switch (key) {
+      case kPermAnytime:
+        return 'TIME: let the teacher mark attendance any time, not just the first $kMarkWindowMinutes minutes of the hour.';
+      case kPermChangeTime:
+        return 'SET TIME: let the teacher pick the class time manually.';
+      case kPermChangeDate:
+        return 'DATE: let the teacher choose any date, not just today.';
+      case kPermEdit:
+        return 'EDIT: let the teacher change attendance that is already taken.';
+      case kPermDelete:
+        return 'DELETE: let the teacher delete attendance records.';
+      default:
+        return '';
+    }
   }
 
   void _showBackupRestore() {
@@ -7009,8 +7185,10 @@ class _ImportReviewScreenState extends State<ImportReviewScreen> {
 
 // Subject attendance screen
 // Admin: no restrictions. Teacher: with the master switch OFF, only today's
-// date, only in the first 20 minutes of each hour, and only a new record. With
-// the switch ON, everything is open. Each subject has its own screen.
+// date, only in the first 20 minutes of each hour, and only a new record,
+// unless the admin allows each ability in Detailed permissions (any time,
+// change time, change date, edit, delete). With the master switch ON,
+// everything is open. Each subject has its own screen.
 class SubjectAttendanceScreen extends StatefulWidget {
   final SemRef sem;
   final String semLabel;
@@ -7047,15 +7225,21 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
   // selected date, copying the previous session, and the percentages.
   List<DateRecord> _records = [];
 
-  bool masterOn = false;
+  TeacherPerms perms = TeacherPerms.none;
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _permSub;
   Timer? _ticker;
+  bool _lastWindowState = true;
 
   CollectionReference<Map<String, dynamic>> get _datesRef =>
       widget.sem.dates(widget.subjectName);
 
   bool get _isAdmin => AppSession.isAdmin;
-  bool get _unrestricted => _isAdmin || masterOn;
+  // Full access: admin, or a teacher while the master switch is ON.
+  bool get _unrestricted => _isAdmin || perms.master;
+  bool get _canChangeTime => _unrestricted || perms.changeTime;
+  bool get _canChangeDate => _unrestricted || perms.changeDate;
+  bool get _canEditExisting => _unrestricted || perms.edit;
+  bool get _canDeleteRec => _unrestricted || perms.delete;
   bool get _isToday {
     final n = DateTime.now();
     return selectedDate.year == n.year &&
@@ -7064,7 +7248,11 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
   }
 
   bool get _inWindow => DateTime.now().minute < kMarkWindowMinutes;
-  bool get _canEdit => _unrestricted || (!existingRecord && _isToday && _inWindow);
+  bool get _canEdit {
+    if (_unrestricted) return true;
+    if (existingRecord) return perms.edit;
+    return (_isToday || perms.changeDate) && (_inWindow || perms.anytime);
+  }
 
   @override
   void initState() {
@@ -7073,13 +7261,19 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
     selectedSession = widget.initialSession ?? 1;
 
     _permSub = permissionsRef().snapshots().listen((s) {
-      final on = s.data()?['teachers_unrestricted'] == true;
-      if (mounted && on != masterOn) setState(() => masterOn = on);
+      final p = TeacherPerms.from(s.data());
+      if (mounted && p != perms) setState(() => perms = p);
     }, onError: (_) {});
 
     // Update the screen when the window opens or closes
+    _lastWindowState = _inWindow;
     _ticker = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (mounted && !_isAdmin) setState(() {});
+      if (!mounted || _isAdmin) return;
+      final now = _inWindow;
+      if (now != _lastWindowState) {
+        _lastWindowState = now;
+        setState(() {});
+      }
     });
 
     _loadAll();
@@ -7160,11 +7354,16 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
 
   void _computePercentages() {
     final total = _records.length;
+    final counts = <String, int>{};
+    for (final r in _records) {
+      r.status.forEach((roll, st) {
+        if (st == 'P') counts[roll] = (counts[roll] ?? 0) + 1;
+      });
+    }
     final Map<String, double> result = {};
     for (final s in students) {
       final roll = s['roll']!;
-      final present = _records.where((r) => r.status[roll] == 'P').length;
-      result[roll] = total > 0 ? (present / total) * 100 : 100.0;
+      result[roll] = total > 0 ? ((counts[roll] ?? 0) / total) * 100 : 100.0;
     }
     studentPercentage = result;
   }
@@ -7196,8 +7395,10 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       showSnack(
           context,
           existingRecord
-              ? 'Only an admin can edit this record.'
-              : 'Attendance can only be marked within the first $kMarkWindowMinutes minutes of each hour.',
+              ? 'You do not have permission to edit this record. Ask the admin.'
+              : (!_isToday && !perms.changeDate)
+                  ? 'You can only mark attendance for today.'
+                  : 'Attendance can only be marked within the first $kMarkWindowMinutes minutes of each hour.',
           color: kAbsent);
       return;
     }
@@ -7208,9 +7409,12 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       for (final s in students) s['roll']!: attendanceStatus[s['roll']!] ?? 'P',
     };
 
-    // Time: an admin (or a teacher when the master switch is ON) can pick their
-    // own time. Otherwise use the current time.
-    String? time = _unrestricted ? timeStr : hhmm(TimeOfDay.now());
+    // Time: an admin (or a teacher allowed to change the time, or when the
+    // master switch is ON) can pick their own time. Otherwise a new record
+    // gets the current time and an edited record keeps its old time.
+    String? time = _canChangeTime
+        ? timeStr
+        : (existingRecord ? timeStr : hhmm(TimeOfDay.now()));
     if (time == null && !existingRecord) time = hhmm(TimeOfDay.now());
     if (time != null) data['_time'] = time;
 
@@ -7269,7 +7473,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
   }
 
   void _deleteAttendance() async {
-    if (!_unrestricted) return;
+    if (!_canDeleteRec) return;
     final docId = _getDocumentId();
     unawaited(_datesRef.doc(docId).delete().catchError((_) {}));
     unawaited(LocalDb.deleteAttendance(widget.sem, widget.subjectName, docId));
@@ -7308,7 +7512,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
           sheet: sheet,
           students: students,
           existingIds: _records.map((r) => r.id).toSet(),
-          canOverwrite: _unrestricted,
+          canOverwrite: _canEditExisting,
         ),
       ),
     );
@@ -7325,7 +7529,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       if (!plan.cols.contains(col.col)) continue;
       final docId = col.docId;
       final old = _recordById(docId);
-      if (old != null && !_unrestricted) {
+      if (old != null && !_canEditExisting) {
         skipped++;
         continue;
       }
@@ -7419,17 +7623,19 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
   Widget _restrictionBanner() {
     if (_unrestricted) return const SizedBox.shrink();
     if (existingRecord) {
+      if (perms.edit) return const SizedBox.shrink();
       return const InfoBanner(
-        text: 'Attendance for this session has already been taken. Only an admin can edit it.',
+        text: 'Attendance for this session has already been taken. You do not have permission to edit it. Ask the admin.',
         icon: Icons.lock_outline,
       );
     }
-    if (!_isToday) {
+    if (!_isToday && !perms.changeDate) {
       return const InfoBanner(
         text: 'Aap sirf aaj ki date ki attendance le sakte hain.',
         icon: Icons.lock_outline,
       );
     }
+    if (perms.anytime) return const SizedBox.shrink();
     if (!_inWindow) {
       return InfoBanner(
         text:
@@ -7479,7 +7685,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
             },
             tooltip: 'Subject History & Stats',
           ),
-          if (_unrestricted)
+          if (_canEditExisting || _canDeleteRec)
             IconButton(
               icon: const Icon(Icons.edit_calendar_outlined),
               onPressed: () {
@@ -7551,7 +7757,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                             "Date: ${DateFormat('dd MMM yyyy').format(selectedDate)}",
                             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                           ),
-                          if (_unrestricted)
+                          if (_canChangeDate)
                             ElevatedButton.icon(
                               onPressed: () async {
                                 DateTime? picked = await showDatePicker(
@@ -7570,7 +7776,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                             ),
                         ],
                       ),
-                      if (_unrestricted) ...[
+                      if (_canChangeTime) ...[
                         const SizedBox(height: 8),
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -7622,6 +7828,52 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                   ),
                 ),
                 const Divider(height: 1, color: kOutline),
+                if (students.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+                    child: Row(
+                      children: [
+                        const Text('Mark all:',
+                            style: TextStyle(color: kMuted, fontSize: 13)),
+                        const SizedBox(width: 10),
+                        OutlinedButton(
+                          onPressed: canEdit
+                              ? () => setState(() {
+                                    for (final st in students) {
+                                      attendanceStatus[st['roll']!] = 'A';
+                                    }
+                                  })
+                              : null,
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: kAbsent,
+                            side: BorderSide(
+                                color: canEdit ? kAbsent : kOutline),
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                          ),
+                          child: const Text('All Absent'),
+                        ),
+                        const SizedBox(width: 8),
+                        OutlinedButton(
+                          onPressed: canEdit
+                              ? () => setState(() {
+                                    for (final st in students) {
+                                      attendanceStatus[st['roll']!] = 'P';
+                                    }
+                                  })
+                              : null,
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: kPresent,
+                            side: BorderSide(
+                                color: canEdit ? kPresent : kOutline),
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                          ),
+                          child: const Text('All Present'),
+                        ),
+                      ],
+                    ),
+                  ),
                 Expanded(
                   child: students.isEmpty
                       ? const EmptyState(
@@ -7637,7 +7889,8 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                             double? pct = studentPercentage[roll];
                             bool isLow = pct != null && pct < 75;
 
-                            return AppCard(
+                            return RepaintBoundary(
+                                child: AppCard(
                               margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                               padding: const EdgeInsets.fromLTRB(12, 8, 10, 8),
                               child: Row(
@@ -7693,7 +7946,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                                   ),
                                 ],
                               ),
-                            );
+                            ));
                           },
                         ),
                 ),
@@ -7701,7 +7954,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                   padding: const EdgeInsets.all(16.0),
                   child: Row(
                     children: [
-                      if (_unrestricted) ...[
+                      if (_canDeleteRec) ...[
                         Expanded(
                           flex: 1,
                           child: SizedBox(
@@ -7762,7 +8015,8 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
 }
 
 // Manage attendance screen (edit / delete old records)
-// Admin only, or a teacher when the master switch is ON.
+// Admin, or a teacher who was given the Edit and/or Delete permission (or when
+// the master switch is ON). The Edit and Delete buttons follow those permissions.
 class ManageAttendanceScreen extends StatelessWidget {
   final SemRef sem;
   final String semLabel;
@@ -7801,6 +8055,17 @@ class ManageAttendanceScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: permissionsRef().snapshots(),
+      builder: (context, permSnap) {
+        final perms = TeacherPerms.from(permSnap.data?.data());
+        final full = AppSession.isAdmin || perms.master;
+        return _buildRecords(context, full || perms.edit, full || perms.delete);
+      },
+    );
+  }
+
+  Widget _buildRecords(BuildContext context, bool canEdit, bool canDelete) {
     return Scaffold(
       appBar: AppBar(title: Text('$subjectName - Records')),
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
@@ -7867,6 +8132,7 @@ class ManageAttendanceScreen extends StatelessWidget {
                         ],
                       ),
                     ),
+                    if (canEdit)
                     IconButton(
                       icon: const Icon(Icons.edit_outlined, color: kAccent),
                       tooltip: 'Edit',
@@ -7887,6 +8153,7 @@ class ManageAttendanceScreen extends StatelessWidget {
                               );
                             },
                     ),
+                    if (canDelete)
                     IconButton(
                       icon: const Icon(Icons.delete_outline, color: kAbsent),
                       tooltip: 'Delete',
@@ -8456,6 +8723,6 @@ class _MonthlyAttendanceScreenState extends State<MonthlyAttendanceScreen> {
           ),
         ],
       ),
-    );
+    );f
   }
 }
