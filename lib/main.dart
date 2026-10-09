@@ -671,8 +671,8 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
 }
 
 // Teacher login / sign up
-// Stored at teachers/{username}: name, username, password.
-// Sign-up does not need admin approval.
+// Stored at teachers/{username}: name, username, password, status.
+// New sign-ups start as 'pending' and need admin approval.
 class TeacherAuthScreen extends StatefulWidget {
   const TeacherAuthScreen({super.key});
 
@@ -733,7 +733,23 @@ class _TeacherAuthScreenState extends State<TeacherAuthScreen> {
           setState(() => _error = 'Incorrect username or password');
           return;
         }
+        // Approval is checked only here, at login. Once approved, the saved
+        // local session is used and the server is never asked again.
+        // Teachers without a status (created before this feature) count as
+        // approved.
+        final status = teacherStatusOf(data);
+        if (status == 'pending') {
+          setState(() =>
+              _error = 'Your account is waiting for admin approval.');
+          return;
+        }
+        if (status == 'denied') {
+          setState(() =>
+              _error = 'Your account request was rejected by the admin.');
+          return;
+        }
         final tName = (data['name'] ?? username).toString();
+        unawaited(LocalDb.upsertTeacher(id, tName, username));
         await AppSession.loginTeacher(id, tName);
       } else {
         if (exists) {
@@ -745,9 +761,19 @@ class _TeacherAuthScreenState extends State<TeacherAuthScreen> {
           'name': name,
           'username': username,
           'password': password,
+          'status': 'pending',
         }).catchError((_) {}));
-        unawaited(LocalDb.upsertTeacher(id, name, username));
-        await AppSession.loginTeacher(id, name);
+        // No auto login: the admin has to approve the account first.
+        if (mounted) {
+          setState(() {
+            _isLogin = true;
+            _passwordController.clear();
+            _error = null;
+          });
+          showSnack(context,
+              'Account created. You can log in after the admin approves it.');
+        }
+        return;
       }
       if (mounted) Navigator.of(context).popUntil((r) => r.isFirst);
     } catch (_) {
@@ -840,6 +866,158 @@ class _TeacherAuthScreenState extends State<TeacherAuthScreen> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Teacher approval
+// Status is stored at teachers/{id}.status: 'pending' | 'approved' | 'denied'.
+// Teachers without a status (created before this feature) count as approved.
+// ---------------------------------------------------------------------------
+String teacherStatusOf(Map<String, dynamic> data) {
+  final s = (data['status'] ?? 'approved').toString();
+  return (s == 'pending' || s == 'denied') ? s : 'approved';
+}
+
+// Admin icon in the Departments app bar, with a badge for pending requests.
+class TeacherRequestsButton extends StatelessWidget {
+  const TeacherRequestsButton({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: FirebaseFirestore.instance.collection('teachers').snapshots(),
+      builder: (context, snap) {
+        final pending = snap.data?.docs
+                .where((d) => teacherStatusOf(d.data()) == 'pending')
+                .length ??
+            0;
+        return IconButton(
+          tooltip: 'Teacher requests',
+          icon: Badge(
+            isLabelVisible: pending > 0,
+            label: Text('$pending'),
+            child: const Icon(Icons.how_to_reg_outlined),
+          ),
+          onPressed: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const TeacherRequestsScreen()),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class TeacherRequestsScreen extends StatelessWidget {
+  const TeacherRequestsScreen({super.key});
+
+  void _setStatus(BuildContext context, String id, String status) {
+    // Not awaited: set() does not complete while offline. The list updates
+    // from the local cache right away and syncs when internet is back.
+    unawaited(FirebaseFirestore.instance
+        .collection('teachers')
+        .doc(id)
+        .set({'status': status}, SetOptions(merge: true)).catchError((_) {
+      if (context.mounted) {
+        showSnack(context, 'Could not update the teacher.', color: kAbsent);
+      }
+    }));
+  }
+
+  Widget _list(BuildContext context,
+      List<QueryDocumentSnapshot<Map<String, dynamic>>> docs, String status) {
+    final items = docs.where((d) => teacherStatusOf(d.data()) == status).toList()
+      ..sort((a, b) => (a.data()['name'] ?? '')
+          .toString()
+          .toLowerCase()
+          .compareTo((b.data()['name'] ?? '').toString().toLowerCase()));
+    if (items.isEmpty) {
+      return EmptyState(
+          icon: Icons.person_off_outlined, text: 'No $status teachers.');
+    }
+    return ListView.separated(
+      padding: const EdgeInsets.all(12),
+      itemCount: items.length,
+      separatorBuilder: (_, _) => const SizedBox(height: 8),
+      itemBuilder: (context, i) {
+        final d = items[i];
+        final data = d.data();
+        final name = (data['name'] ?? d.id).toString();
+        final username = (data['username'] ?? d.id).toString();
+        return AppCard(
+          margin: EdgeInsets.zero,
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(name,
+                        style: const TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 2),
+                    Text('@$username',
+                        style: const TextStyle(color: kMuted, fontSize: 13)),
+                  ],
+                ),
+              ),
+              if (status != 'denied')
+                TextButton(
+                  onPressed: () => _setStatus(context, d.id, 'denied'),
+                  style: TextButton.styleFrom(foregroundColor: kAbsent),
+                  child: const Text('Deny'),
+                ),
+              if (status != 'approved')
+                ElevatedButton(
+                  onPressed: () => _setStatus(context, d.id, 'approved'),
+                  child: const Text('Approve'),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DefaultTabController(
+      length: 3,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Teacher requests'),
+          bottom: const TabBar(
+            tabs: [
+              Tab(text: 'Pending'),
+              Tab(text: 'Approved'),
+              Tab(text: 'Denied'),
+            ],
+          ),
+        ),
+        body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: FirebaseFirestore.instance.collection('teachers').snapshots(),
+          builder: (context, snap) {
+            if (snap.hasError) {
+              return const EmptyState(
+                  icon: Icons.cloud_off_outlined,
+                  text: 'Could not load teachers.');
+            }
+            if (!snap.hasData) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            final docs = snap.data!.docs;
+            return TabBarView(
+              children: [
+                _list(context, docs, 'pending'),
+                _list(context, docs, 'approved'),
+                _list(context, docs, 'denied'),
+              ],
+            );
+          },
         ),
       ),
     );
@@ -3311,6 +3489,7 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
               tooltip: 'Teacher permissions (master switch)',
               onPressed: _showMasterSwitch,
             ),
+          if (_isAdmin && !claim) const TeacherRequestsButton(),
           if (_isAdmin && !claim)
             IconButton(
               icon: const Icon(Icons.delete_sweep_outlined, color: kAbsent),
