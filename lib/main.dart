@@ -15,9 +15,17 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:archive/archive.dart' as zip;
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
+import 'download_stub.dart'
+    if (dart.library.html) 'download_web.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // On the web, SQLite runs through the ffi-web factory (IndexedDB based).
+  if (kIsWeb) {
+    sql.databaseFactory = databaseFactoryFfiWeb;
+  }
   await Firebase.initializeApp(
     options: const FirebaseOptions(
       apiKey: "AIzaSyBlokxXBdPiOPCC0P6P7DtS72tSruzJcHk",
@@ -1022,6 +1030,13 @@ Future<_Net> _netState() async {
         : const Duration(seconds: 4);
     if (DateTime.now().difference(_netCacheAt) < ttl) return cached;
   }
+  // InternetAddress.lookup is not available on the web; the connectivity
+  // check above is enough there.
+  if (kIsWeb) {
+    _netCache = _Net.reachable;
+    _netCacheAt = DateTime.now();
+    return _Net.reachable;
+  }
   _Net result;
   try {
     final res = await InternetAddress.lookup('firestore.googleapis.com')
@@ -1209,184 +1224,529 @@ String fmtHhmm(String? s) {
 }
 
 // ---- Shared Excel layout ----
-// Both the monthly and overall exports use this layout: university name,
-// subject, session row, date row, time row, then the students.
+// Both the monthly and overall exports use this layout:
+//   top info section (Program / Semester / Instructor / Course / Section /
+//   Marks), then three header rows (Week, Date, Class No.), then the students.
+// Attendance is stored as 1 (present) / 0 (absent). Total Classes, Total
+// Present, Percentage and Marks are Excel formulas, so they follow any edit.
+
+// Total attendance marks of a course. It is only the starting value of the
+// "Marks" cell in the sheet; the formulas read that cell, so it can be changed
+// per course directly in Excel.
+const double kDefaultAttendanceMarks = 5;
+
+// Details shown in the top info section. Nothing is hardcoded: everything
+// comes from the semester / subject that is being exported.
+class ExcelInfo {
+  final String program;
+  final String semester;
+  final String instructor;
+  final String course;
+  final String section;
+  final double marks;
+  const ExcelInfo({
+    required this.program,
+    required this.semester,
+    required this.instructor,
+    required this.course,
+    required this.section,
+    this.marks = kDefaultAttendanceMarks,
+  });
+}
+
+Future<ExcelInfo> loadExcelInfo(SemRef sem, String subject) async {
+  String semLabel = defaultSemesterLabel(sem.semester);
+  try {
+    final labels = await loadSemesterLabels(sem.deptId, sem.section);
+    semLabel = labels[sem.semester] ?? semLabel;
+  } catch (_) {}
+
+  String instructor = '';
+  try {
+    final res = await _safeQuery(
+        sem.subjects.where(FieldPath.documentId, isEqualTo: subject));
+    if (res.docs.isNotEmpty) {
+      instructor = (res.docs.first.data()['claimed_by_name'] ?? '').toString();
+    }
+  } catch (_) {}
+  if (instructor.isEmpty && !AppSession.isAdmin) {
+    instructor = AppSession.teacherName;
+  }
+
+  return ExcelInfo(
+    program: sem.deptId,
+    semester: semLabel,
+    instructor: instructor,
+    course: subject,
+    section: sem.section,
+  );
+}
+
+String _excelColLetters(int c) {
+  var n = c + 1;
+  var s = '';
+  while (n > 0) {
+    final m = (n - 1) % 26;
+    s = String.fromCharCode(65 + m) + s;
+    n = (n - 1) ~/ 26;
+  }
+  return s;
+}
+
+String _ordinal(int n) {
+  final m100 = n % 100;
+  if (m100 >= 11 && m100 <= 13) return '${n}th';
+  switch (n % 10) {
+    case 1:
+      return '${n}st';
+    case 2:
+      return '${n}nd';
+    case 3:
+      return '${n}rd';
+    default:
+      return '${n}th';
+  }
+}
+
+// ---- Direct .xlsx writer ----
+// The excel package was dropping styles / merges on some builds (that is why
+// the title, "Week N" and the info section never looked centered or big).
+// The sheet is now written straight as xlsx XML, so every style, merge, width
+// and row height is exactly what is set below.
+class _XlsxBuilder {
+  final List<String> _fonts = [
+    '<font><sz val="11"/><name val="Calibri"/><family val="2"/></font>'
+  ];
+  final List<String> _fills = [
+    '<fill><patternFill patternType="none"/></fill>',
+    '<fill><patternFill patternType="gray125"/></fill>'
+  ];
+  final List<String> _borders = [
+    '<border><left/><right/><top/><bottom/><diagonal/></border>'
+  ];
+  final List<String> _xfs = [
+    '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+  ];
+  final Map<int, Map<int, String>> _cells = {};
+  final Map<int, double> rowHeights = {};
+  final Map<int, double> colWidths = {};
+  final List<String> merges = [];
+
+  int _idx(List<String> list, String xml) {
+    final i = list.indexOf(xml);
+    if (i >= 0) return i;
+    list.add(xml);
+    return list.length - 1;
+  }
+
+  String _side(String tag, String? style, String color) => style == null
+      ? '<$tag/>'
+      : '<$tag style="$style"><color rgb="$color"/></$tag>';
+
+  int style({
+    String font = 'FF000000',
+    String? bg,
+    int size = 11,
+    bool bold = true,
+    bool left = false,
+    bool wrap = false,
+    bool border = true,
+    bool thick = false,
+  }) {
+    final fontId = _idx(
+        _fonts,
+        '<font>${bold ? '<b/>' : ''}<sz val="$size"/>'
+        '<color rgb="$font"/><name val="Calibri"/><family val="2"/></font>');
+    final fillId = bg == null
+        ? 0
+        : _idx(
+            _fills,
+            '<fill><patternFill patternType="solid"><fgColor rgb="$bg"/>'
+            '<bgColor indexed="64"/></patternFill></fill>');
+    final bStyle = border ? (thick ? 'medium' : 'thin') : null;
+    final bColor = thick ? 'FF1F3864' : 'FF8EA9C1';
+    final borderId = _idx(
+        _borders,
+        '<border>${_side('left', bStyle, bColor)}${_side('right', bStyle, bColor)}'
+        '${_side('top', bStyle, bColor)}${_side('bottom', bStyle, bColor)}'
+        '<diagonal/></border>');
+    return _idx(
+        _xfs,
+        '<xf numFmtId="0" fontId="$fontId" fillId="$fillId" borderId="$borderId" '
+        'xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">'
+        '<alignment horizontal="${left ? 'left' : 'center'}" vertical="center"'
+        '${wrap ? ' wrapText="1"' : ''}/></xf>');
+  }
+
+  String _esc(String s) => s
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;');
+
+  String _num(num v) => v == v.roundToDouble() ? v.round().toString() : '$v';
+
+  void _put(int c, int r, String xml) =>
+      (_cells[r] ??= <int, String>{})[c] = xml;
+
+  String _ref(int c, int r) => '${_excelColLetters(c)}${r + 1}';
+
+  void blank(int c, int r, int s) => _put(c, r, '<c r="${_ref(c, r)}" s="$s"/>');
+
+  void text(int c, int r, String v, int s) => _put(
+      c,
+      r,
+      '<c r="${_ref(c, r)}" s="$s" t="inlineStr"><is>'
+      '<t xml:space="preserve">${_esc(v)}</t></is></c>');
+
+  void number(int c, int r, num v, int s) =>
+      _put(c, r, '<c r="${_ref(c, r)}" s="$s"><v>${_num(v)}</v></c>');
+
+  void formula(int c, int r, String f, num cached, int s) => _put(c, r,
+      '<c r="${_ref(c, r)}" s="$s"><f>${_esc(f)}</f><v>${_num(cached)}</v></c>');
+
+  // Merged area: every cell gets the style (so colour + borders are kept),
+  // the text is written in the first cell only.
+  void merge(int c1, int r1, int c2, int r2, String? v, int s) {
+    for (int r = r1; r <= r2; r++) {
+      for (int c = c1; c <= c2; c++) {
+        blank(c, r, s);
+      }
+    }
+    if (v != null) text(c1, r1, v, s);
+    if (c1 != c2 || r1 != r2) merges.add('${_ref(c1, r1)}:${_ref(c2, r2)}');
+  }
+
+  List<int> build() {
+    final rows = <int>{..._cells.keys, ...rowHeights.keys}.toList()..sort();
+    final sb = StringBuffer(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>'
+        '<sheetViews><sheetView workbookViewId="0" tabSelected="1"/></sheetViews>'
+        '<sheetFormatPr defaultRowHeight="22" customHeight="1"/>');
+    if (colWidths.isNotEmpty) {
+      sb.write('<cols>');
+      final keys = colWidths.keys.toList()..sort();
+      for (final c in keys) {
+        sb.write('<col min="${c + 1}" max="${c + 1}" '
+            'width="${colWidths[c]}" customWidth="1"/>');
+      }
+      sb.write('</cols>');
+    }
+    sb.write('<sheetData>');
+    for (final r in rows) {
+      final h = rowHeights[r];
+      sb.write('<row r="${r + 1}"'
+          '${h != null ? ' ht="$h" customHeight="1"' : ''}>');
+      final row = _cells[r];
+      if (row != null) {
+        final cols = row.keys.toList()..sort();
+        for (final c in cols) {
+          sb.write(row[c]);
+        }
+      }
+      sb.write('</row>');
+    }
+    sb.write('</sheetData>');
+    if (merges.isNotEmpty) {
+      sb.write('<mergeCells count="${merges.length}">'
+          '${merges.map((m) => '<mergeCell ref="$m"/>').join()}</mergeCells>');
+    }
+    sb.write('<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" '
+        'header="0.3" footer="0.3"/>'
+        '<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0"/>'
+        '</worksheet>');
+
+    final styles = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="${_fonts.length}">${_fonts.join()}</fonts>'
+        '<fills count="${_fills.length}">${_fills.join()}</fills>'
+        '<borders count="${_borders.length}">${_borders.join()}</borders>'
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        '<cellXfs count="${_xfs.length}">${_xfs.join()}</cellXfs>'
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+        '</styleSheet>';
+
+    const contentTypes = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+        '</Types>';
+    const rootRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+        '</Relationships>';
+    const workbook = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>'
+        '<calcPr calcId="191029" fullCalcOnLoad="1"/></workbook>';
+    const workbookRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+        '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+        '</Relationships>';
+
+    final out = zip.Archive();
+    void add(String name, String content) {
+      final data = utf8.encode(content);
+      out.addFile(zip.ArchiveFile(name, data.length, data));
+    }
+
+    add('[Content_Types].xml', contentTypes);
+    add('_rels/.rels', rootRels);
+    add('xl/workbook.xml', workbook);
+    add('xl/_rels/workbook.xml.rels', workbookRels);
+    add('xl/styles.xml', styles);
+    add('xl/worksheets/sheet1.xml', sb.toString());
+    return zip.ZipEncoder().encode(out) ?? <int>[];
+  }
+}
+
 List<int>? buildAttendanceExcelBytes({
-  required String subject,
+  required ExcelInfo info,
   required List<DateRecord> recs,
   required List<Map<String, String>> students,
 }) {
   final records = List<DateRecord>.from(recs)
     ..sort((a, b) => a.id.compareTo(b.id));
-  final excel = excel_lib.Excel.createExcel();
-  final excel_lib.Sheet sheet = excel['Sheet1'];
+  final x = _XlsxBuilder();
 
-  excel_lib.CellIndex ci(int c, int r) =>
-      excel_lib.CellIndex.indexByColumnRow(columnIndex: c, rowIndex: r);
-  excel_lib.ExcelColor hex(String h) => excel_lib.ExcelColor.fromHexString(h);
+  // ---- Colour theme ----
+  const navy = 'FF1F3864';
+  const blue = 'FF2F5597';
+  final titleStyle = x.style(size: 40, font: 'FFFFFFFF', bg: navy, thick: true);
+  final fillerStyle = x.style(bg: 'FFEAF0F8', thick: true);
+  final infoLabelStyle =
+      x.style(size: 16, font: 'FFFFFFFF', bg: blue, thick: true);
+  final infoValueStyle = x.style(size: 17, bg: 'FFFFF2CC', thick: true);
+  final idHeadStyle =
+      x.style(size: 16, font: 'FFFFFFFF', bg: navy, wrap: true, thick: true);
+  final totalHeadStyle =
+      x.style(size: 13, font: 'FFFFFFFF', bg: 'FF44546A', wrap: true, thick: true);
+  final presentHeadStyle =
+      x.style(size: 13, font: 'FFFFFFFF', bg: 'FF548235', wrap: true, thick: true);
+  final pctHeadStyle =
+      x.style(size: 13, font: 'FFFFFFFF', bg: 'FFC55A11', wrap: true, thick: true);
+  final marksHeadStyle =
+      x.style(size: 13, font: 'FFFFFFFF', bg: 'FFBF9000', wrap: true, thick: true);
+  final marksCellStyle = x.style(size: 13, bg: 'FFFFF2CC');
+  final totalCellStyle = x.style(size: 13, bg: 'FFE7EAF0');
+  final cellStyle = x.style(size: 13, bg: 'FFFFFFFF');
+  final cellStyleAlt = x.style(size: 13, bg: 'FFF2F2F2');
+  final nameStyle = x.style(size: 13, left: true, bg: 'FFFFFFFF');
+  final nameStyleAlt = x.style(size: 13, left: true, bg: 'FFF2F2F2');
 
-  final thin = excel_lib.Border(borderStyle: excel_lib.BorderStyle.Thin);
-  final noBorder = excel_lib.Border();
+  const weekHeadColors = [
+    'FF2E75B6', 'FF548235', 'FFC55A11', 'FF7030A0', 'FF00808A', 'FFBF9000'
+  ];
+  const weekTintColors = [
+    'FFBDD7EE', 'FFC6E0B4', 'FFF8CBAD', 'FFD9C3E8', 'FFB2DFDB', 'FFFFE699'
+  ];
+  const weekLightColors = [
+    'FFDDEBF7', 'FFE2EFDA', 'FFFCE4D6', 'FFEDE2F4', 'FFDDF1EF', 'FFFFF2CC'
+  ];
+  final weekHeadStyles = [
+    for (final c in weekHeadColors)
+      x.style(size: 24, font: 'FFFFFFFF', bg: c, thick: true)
+  ];
+  final weekDateStyles = [
+    for (final c in weekTintColors) x.style(size: 13, bg: c, wrap: true)
+  ];
+  final weekSerialStyles = [
+    for (final c in weekLightColors) x.style(size: 12, bg: c)
+  ];
+  final presentStyle = x.style(size: 13, font: 'FF375623', bg: 'FFC6EFCE');
+  final absentStyle = x.style(size: 13, font: 'FF9C0006', bg: 'FFFFC7CE');
 
-  excel_lib.CellStyle mk({
-    String font = 'FF000000',
-    String? bg,
-    int size = 11,
-    bool left = false,
-    bool wrap = false,
-    bool border = true,
-  }) {
-    final b = border ? thin : noBorder;
-    return excel_lib.CellStyle(
-      bold: true,
-      fontSize: size,
-      fontColorHex: hex(font),
-      backgroundColorHex: bg == null ? excel_lib.ExcelColor.none : hex(bg),
-      horizontalAlign:
-          left ? excel_lib.HorizontalAlign.Left : excel_lib.HorizontalAlign.Center,
-      verticalAlign: excel_lib.VerticalAlign.Center,
-      textWrapping: wrap ? excel_lib.TextWrapping.WrapText : null,
-      leftBorder: b,
-      rightBorder: b,
-      topBorder: b,
-      bottomBorder: b,
-    );
-  }
-
-  final titleStyle = mk(size: 24, bg: 'FFBDD7EE', border: false);
-  final subjectStyle = mk(size: 16, bg: 'FFDDEBF7', border: false);
-  final headStyle = mk(bg: 'FFD9D9D9', wrap: true);
-  final timeStyle = mk(size: 9, bg: 'FFF2F2F2');
-  final cellStyle = mk();
-  final nameStyle = mk(left: true);
-  final presentStyle = mk(font: 'FF005000', bg: 'FFC6EFCE');
-  final absentStyle = mk(font: 'FFB00000', bg: 'FFFFC7CE');
-
-  void put(int c, int r, excel_lib.CellValue v, excel_lib.CellStyle st) {
-    final cell = sheet.cell(ci(c, r));
-    cell.value = v;
-    cell.cellStyle = st;
-  }
-
-  void mergePut(
-      int c1, int r1, int c2, int r2, String text, excel_lib.CellStyle st) {
-    if (c1 != c2 || r1 != r2) {
-      sheet.merge(ci(c1, r1), ci(c2, r2),
-          customValue: excel_lib.TextCellValue(text));
-    }
-    for (int r = r1; r <= r2; r++) {
-      for (int c = c1; c <= c2; c++) {
-        sheet.cell(ci(c, r)).cellStyle = st;
-      }
-    }
-    sheet.cell(ci(c1, r1)).value = excel_lib.TextCellValue(text);
-  }
-
+  // ---- Columns ----
   const int firstSessionCol = 2;
   final n = records.length;
   final totalClassesCol = firstSessionCol + n;
   final presentCol = totalClassesCol + 1;
-  final absentCol = totalClassesCol + 2;
-  final pctCol = totalClassesCol + 3;
-  final lastCol = pctCol;
+  final pctCol = totalClassesCol + 2;
+  final marksCol = totalClassesCol + 3;
+  final lastCol = marksCol < 11 ? 11 : marksCol;
 
-  // Row 0: "University of Swabi". Row 1: "Subject: <name>".
-  // The text is centered in the middle column instead of merging cells. The
-  // other cells stay empty, so the text spreads evenly across the table.
-  final midCol = lastCol ~/ 2;
-  for (int c = 0; c <= lastCol; c++) {
-    if (c == midCol) {
-      put(c, 0, excel_lib.TextCellValue('University of Swabi'), titleStyle);
-      put(c, 1, excel_lib.TextCellValue('Subject: $subject'), subjectStyle);
+  // ---- Rows ----
+  const int infoRow0 = 1;
+  const int weekRow = 4;
+  const int dateRow = 5;
+  const int serialRow = 6;
+  const int firstStudentRow = 7;
+
+  // Row 0: title, merged across the whole width, big and centered.
+  x.merge(0, 0, lastCol, 0, 'University of Swabi', titleStyle);
+
+  void infoRow(int row, String l1, Object v1, String l2, String v2) {
+    x.merge(0, row, 1, row, l1, infoLabelStyle);
+    if (v1 is num) {
+      x.merge(2, row, 4, row, null, infoValueStyle);
+      x.number(2, row, v1, infoValueStyle);
     } else {
-      // style only, no value (otherwise the text stops spreading)
-      sheet.cell(ci(c, 0)).cellStyle = titleStyle;
-      sheet.cell(ci(c, 1)).cellStyle = subjectStyle;
+      x.merge(2, row, 4, row, v1.toString(), infoValueStyle);
+    }
+    x.merge(5, row, 6, row, l2, infoLabelStyle);
+    x.merge(7, row, 11, row, v2, infoValueStyle);
+    for (int c = 12; c <= lastCol; c++) {
+      x.blank(c, row, fillerStyle);
     }
   }
 
-  // Rows 2-3: session on top and date below, with separate cells for each
-  // session
-  mergePut(0, 2, 0, 3, 'Roll No', headStyle);
-  mergePut(1, 2, 1, 3, 'Name', headStyle);
-  for (int i = 0; i < n; i++) {
-    final id = records[i].id;
-    final parts = id.split('_Session_');
-    final sessionLabel = parts.length > 1 ? 'Session ${parts[1]}' : id;
-    final d = DateTime.tryParse(parts[0]);
-    final dateLabel = d == null ? parts[0] : DateFormat('dd MMM yy').format(d);
-    put(firstSessionCol + i, 2, excel_lib.TextCellValue(sessionLabel), headStyle);
-    put(firstSessionCol + i, 3, excel_lib.TextCellValue(dateLabel), headStyle);
-  }
-  mergePut(totalClassesCol, 2, totalClassesCol, 3, 'Total Classes', headStyle);
-  mergePut(presentCol, 2, presentCol, 3, 'Total Present', headStyle);
-  mergePut(absentCol, 2, absentCol, 3, 'Total Absent', headStyle);
-  mergePut(pctCol, 2, pctCol, 3, 'Percentage (%)', headStyle);
+  final num marksValue =
+      info.marks == info.marks.roundToDouble() ? info.marks.round() : info.marks;
+  infoRow(infoRow0, 'Program', info.program, 'Course', info.course);
+  infoRow(infoRow0 + 1, 'Semester', info.semester, 'Section', info.section);
+  infoRow(infoRow0 + 2, 'Marks', marksValue, 'Instructor', info.instructor);
+  final marksRef = '\$C\$${infoRow0 + 3}';
 
-  // Row 4: time of each session
-  put(0, 4, excel_lib.TextCellValue(''), timeStyle);
-  put(1, 4, excel_lib.TextCellValue('Time'), timeStyle);
-  for (int i = 0; i < n; i++) {
-    put(firstSessionCol + i, 4,
-        excel_lib.TextCellValue(fmtHhmm(records[i].meta['_time'])), timeStyle);
-  }
-  for (final c in [totalClassesCol, presentCol, absentCol, pctCol]) {
-    put(c, 4, excel_lib.TextCellValue(''), timeStyle);
+  // ---- Header rows: Week / Date / Class No. ----
+  x.merge(0, weekRow, 0, serialRow, 'Roll No', idHeadStyle);
+  x.merge(1, weekRow, 1, serialRow, 'Name', idHeadStyle);
+
+  DateTime mondayOf(DateTime d) {
+    final day = DateTime(d.year, d.month, d.day);
+    return day.subtract(Duration(days: day.weekday - DateTime.monday));
   }
 
-  // Student rows
-  int rowIndex = 5;
+  final dates = <DateTime?>[];
+  for (final r in records) {
+    dates.add(DateTime.tryParse(r.id.split('_Session_')[0]));
+  }
+  DateTime? firstMonday;
+  for (final d in dates) {
+    if (d != null) {
+      final m = mondayOf(d);
+      if (firstMonday == null || m.isBefore(firstMonday)) firstMonday = m;
+    }
+  }
+
+  final weekOf = List<int>.filled(n, 1);
+  for (int i = 0; i < n; i++) {
+    final d = dates[i];
+    if (d != null && firstMonday != null) {
+      final md = mondayOf(d);
+      final days = DateTime.utc(md.year, md.month, md.day)
+          .difference(DateTime.utc(
+              firstMonday.year, firstMonday.month, firstMonday.day))
+          .inDays;
+      weekOf[i] = days ~/ 7 + 1;
+    } else if (i > 0) {
+      weekOf[i] = weekOf[i - 1];
+    }
+  }
+
+  // "Week N" merged across that week's columns, centered and big.
+  int i0 = 0;
+  while (i0 < n) {
+    int i1 = i0;
+    while (i1 + 1 < n && weekOf[i1 + 1] == weekOf[i0]) {
+      i1++;
+    }
+    x.merge(firstSessionCol + i0, weekRow, firstSessionCol + i1, weekRow,
+        'Week ${weekOf[i0]}',
+        weekHeadStyles[(weekOf[i0] - 1) % weekHeadStyles.length]);
+    i0 = i1 + 1;
+  }
+
+  int classInWeek = 0;
+  for (int i = 0; i < n; i++) {
+    final d = dates[i];
+    final dateLabel = d == null
+        ? records[i].id.split('_Session_')[0]
+        : DateFormat('d MMM').format(d);
+    if (i == 0 || weekOf[i] != weekOf[i - 1]) {
+      classInWeek = 0;
+    }
+    classInWeek++;
+    final wi = (weekOf[i] - 1) % weekDateStyles.length;
+    x.text(firstSessionCol + i, dateRow, dateLabel, weekDateStyles[wi]);
+    x.text(firstSessionCol + i, serialRow, _ordinal(classInWeek),
+        weekSerialStyles[wi]);
+  }
+
+  x.merge(totalClassesCol, weekRow, totalClassesCol, serialRow,
+      'Total Classes', totalHeadStyle);
+  x.merge(presentCol, weekRow, presentCol, serialRow, 'Total Present',
+      presentHeadStyle);
+  x.merge(pctCol, weekRow, pctCol, serialRow, 'Percentage of Present',
+      pctHeadStyle);
+  x.merge(marksCol, weekRow, marksCol, serialRow, 'Marks', marksHeadStyle);
+
+  // ---- Student rows ----
+  int rowIndex = firstStudentRow;
   int maxName = 4;
   for (final st in students) {
     final roll = st['roll'] ?? '';
     final name = st['name'] ?? '';
     if (name.length > maxName) maxName = name.length;
     int present = 0;
-    int absent = 0;
-    put(0, rowIndex, excel_lib.TextCellValue(rollOf(roll)), cellStyle);
-    put(1, rowIndex, excel_lib.TextCellValue(name), nameStyle);
+    final alt = (rowIndex - firstStudentRow) % 2 == 1;
+    x.text(0, rowIndex, rollOf(roll), alt ? cellStyleAlt : cellStyle);
+    x.text(1, rowIndex, name, alt ? nameStyleAlt : nameStyle);
     for (int i = 0; i < n; i++) {
       final isP = (records[i].status[roll] ?? 'P') == 'P';
-      if (isP) {
-        present++;
-      } else {
-        absent++;
-      }
-      put(firstSessionCol + i, rowIndex,
-          excel_lib.TextCellValue(isP ? 'P' : 'A'),
+      if (isP) present++;
+      x.number(firstSessionCol + i, rowIndex, isP ? 1 : 0,
           isP ? presentStyle : absentStyle);
     }
-    final pct = n > 0 ? (present / n) * 100 : 0.0;
-    put(totalClassesCol, rowIndex, excel_lib.IntCellValue(n), cellStyle);
-    put(presentCol, rowIndex, excel_lib.IntCellValue(present), cellStyle);
-    put(absentCol, rowIndex, excel_lib.IntCellValue(absent), cellStyle);
-    put(pctCol, rowIndex,
-        excel_lib.TextCellValue('${pct.toStringAsFixed(1)}%'),
-        pct >= 75 ? presentStyle : absentStyle);
-    sheet.setRowHeight(rowIndex, 18);
+
+    final xr = rowIndex + 1;
+    final pct = n == 0 ? 0.0 : (present / n) * 100;
+    final pctRounded = (pct * 100).round() / 100;
+    final marksCached = (pctRounded / 100 * info.marks * 100).round() / 100;
+
+    if (n > 0) {
+      final first = '${_excelColLetters(firstSessionCol)}$xr';
+      final last = '${_excelColLetters(firstSessionCol + n - 1)}$xr';
+      final tcRef = '${_excelColLetters(totalClassesCol)}$xr';
+      final tpRef = '${_excelColLetters(presentCol)}$xr';
+      final pcRef = '${_excelColLetters(pctCol)}$xr';
+      x.formula(totalClassesCol, rowIndex, 'COUNT($first:$last)', n,
+          totalCellStyle);
+      x.formula(presentCol, rowIndex, 'SUM($first:$last)', present,
+          presentStyle);
+      x.formula(pctCol, rowIndex, 'IF($tcRef=0,0,ROUND($tpRef/$tcRef*100,2))',
+          pctRounded, pct >= 75 ? presentStyle : absentStyle);
+      x.formula(marksCol, rowIndex, 'ROUND($pcRef/100*$marksRef,2)',
+          marksCached, marksCellStyle);
+    } else {
+      x.number(totalClassesCol, rowIndex, 0, totalCellStyle);
+      x.number(presentCol, rowIndex, 0, presentStyle);
+      x.number(pctCol, rowIndex, 0, absentStyle);
+      x.number(marksCol, rowIndex, 0, marksCellStyle);
+    }
+    x.rowHeights[rowIndex] = 28;
     rowIndex++;
   }
 
-  // Column widths: narrow P/A columns, wide name column
-  sheet.setColumnWidth(0, 8);
-  sheet.setColumnWidth(1, (maxName * 1.15 + 3).clamp(18, 45).toDouble());
-  for (int i = 0; i < n; i++) {
-    sheet.setColumnWidth(firstSessionCol + i, 10);
+  // ---- Column widths: every session column the same size ----
+  x.colWidths[0] = 11;
+  x.colWidths[1] = (maxName * 1.3 + 6).clamp(26, 50).toDouble();
+  for (int c = 2; c <= lastCol; c++) {
+    x.colWidths[c] = 13; // all date / info columns equal
   }
-  sheet.setColumnWidth(totalClassesCol, 9);
-  sheet.setColumnWidth(presentCol, 9);
-  sheet.setColumnWidth(absentCol, 9);
-  sheet.setColumnWidth(pctCol, 12);
+  x.colWidths[totalClassesCol] = 15;
+  x.colWidths[presentCol] = 15;
+  x.colWidths[pctCol] = 19;
+  x.colWidths[marksCol] = 15;
 
-  // Row heights
-  sheet.setRowHeight(0, 42);
-  sheet.setRowHeight(1, 30);
-  sheet.setRowHeight(2, 20);
-  sheet.setRowHeight(3, 20);
-  sheet.setRowHeight(4, 18);
+  // ---- Row heights ----
+  x.rowHeights[0] = 72;
+  for (int r = infoRow0; r < infoRow0 + 3; r++) {
+    x.rowHeights[r] = 36;
+  }
+  x.rowHeights[weekRow] = 44;
+  x.rowHeights[dateRow] = 30;
+  x.rowHeights[serialRow] = 26;
 
-  return excel.save();
+  return x.build();
 }
+
 
 // ---- Student loaders ----
 // Internal key of a student (called "roll" across the app). The first student
@@ -3766,40 +4126,134 @@ String _excelCellText(dynamic data) {
   }
 }
 
+// Rows that are never student names (totals, signature lines, ...).
+final RegExp _importSkipRowRe = RegExp(
+    r'^(total|grand total|average|signature|remarks?|present|absent)$',
+    caseSensitive: false);
+
+// Cleans one name cell: hidden/odd spaces, serial prefixes like "1." "01)" or
+// "12 Rahul", and stray punctuation at the ends.
+String _cleanImportedName(String raw) {
+  var s = raw.replaceAll(RegExp(r'[\u200B-\u200D\uFEFF\u00A0]'), ' ');
+  s = s.replaceAll(RegExp(r'\s+'), ' ').trim();
+  s = s.replaceFirst(RegExp(r'^\(?\d{1,6}\s*[.)\]:\-\u2013]\s*'), '');
+  s = s.replaceFirst(RegExp(r'^\d{1,6}\s+(?=\p{L})', unicode: true), '');
+  s = s.replaceAll(RegExp(r'^[\s,;:\-\u2013]+|[\s,;:\-\u2013]+$'), '');
+  return s.trim();
+}
+
+// 0 = not a name header, 1 = full name, 2 = first name, 3 = last name.
+int _importNameHeaderKind(String raw) {
+  final c = raw
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^\p{L}\p{M}\p{N}\s]', unicode: true), ' ')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+  if (c.isEmpty || c.length > 32) return 0;
+  if (RegExp(r'father|mother|guardian|parent|husband|spouse').hasMatch(c) ||
+      c.contains('\u092A\u093F\u0924\u093E') ||
+      c.contains('\u092E\u093E\u0924\u093E')) {
+    return 0;
+  }
+  if (RegExp(r'^(first|given)\b').hasMatch(c) && c.contains('name')) return 2;
+  if (RegExp(r'^(last|sur|family)').hasMatch(c) && c.contains('name')) {
+    return 3;
+  }
+  if (c == 'student' || c == 'students') return 1;
+  if (RegExp(r'\b(names?|naam)\b').hasMatch(c) || c.contains('\u0928\u093E\u092E')) {
+    return 1;
+  }
+  return 0;
+}
+
+bool _importLooksLikeName(String n) =>
+    n.length >= 2 &&
+    _importLetterRe.hasMatch(n) &&
+    !RegExp(r'\d').hasMatch(n) &&
+    !_importSkipRowRe.hasMatch(n);
+
 List<String> _namesFromRows(List<List<String>> rows) {
   final data = rows.where((r) => r.any((c) => c.trim().isNotEmpty)).toList();
   if (data.isEmpty) return [];
+
+  final out = <String>[];
+  void add(String raw) {
+    final name = _cleanImportedName(raw);
+    if (name.isEmpty || !_importLetterRe.hasMatch(name)) return;
+    if (_importSkipRowRe.hasMatch(name)) return;
+    out.add(name);
+  }
+
+  // 1) Look for a header row in the first 15 rows (title rows above it are
+  //    ignored). Supports "Name", "Student Name", "Name of Student", Hindi
+  //    "naam", and separate "First Name" + "Last Name" columns.
+  var headerRow = -1;
+  var nameCol = -1, firstCol = -1, lastCol = -1;
+  final scan = data.length < 15 ? data.length : 15;
+  for (var i = 0; i < scan && headerRow < 0; i++) {
+    var n = -1, f = -1, l = -1;
+    for (var c = 0; c < data[i].length; c++) {
+      final k = _importNameHeaderKind(data[i][c]);
+      if (k == 1 && n < 0) {
+        n = c;
+      } else if (k == 2 && f < 0) {
+        f = c;
+      } else if (k == 3 && l < 0) {
+        l = c;
+      }
+    }
+    if (n >= 0 || (f >= 0 && l >= 0)) {
+      headerRow = i;
+      nameCol = n;
+      firstCol = f;
+      lastCol = l;
+    }
+  }
+
+  if (headerRow >= 0) {
+    for (final r in data.skip(headerRow + 1)) {
+      String at(int c) => (c >= 0 && c < r.length) ? r[c] : '';
+      if (nameCol >= 0) {
+        add(at(nameCol));
+      } else {
+        add('${at(firstCol)} ${at(lastCol)}');
+      }
+    }
+    return out;
+  }
+
+  // 2) No name header: skip a roll/serial header row if there is one, then
+  //    pick the column that looks most like names (letters, no digits,
+  //    preferably several words). Roll codes like "21CS001" are not names.
   const headerWords = {
     'roll', 'roll no', 'roll no.', 'roll number', 'rollno', 'sr', 'sr.',
     'sr no', 'sr no.', 'sr#', 's.no', 's no', 'sno', 'serial', 'serial no',
     '#', 'no', 'no.', 'id', 'reg no', 'registration no',
   };
-  final first = data.first.map((c) => c.trim().toLowerCase()).toList();
-  final nameCol = first.indexWhere((c) =>
-      c == 'name' ||
-      c == 'names' ||
-      c == 'naam' ||
-      c == 'student' ||
-      c.endsWith(' name') ||
-      c.endsWith(' names'));
-  final hasHeader = nameCol >= 0 || first.any(headerWords.contains);
-
-  final out = <String>[];
-  for (final r in data.skip(hasHeader ? 1 : 0)) {
-    var name = '';
-    if (nameCol >= 0) {
-      if (nameCol < r.length) name = r[nameCol];
-    } else {
-      // Skip numeric roll / serial-number cells and take the first name cell.
-      for (final c in r) {
-        if (_importLetterRe.hasMatch(c)) {
-          name = c;
-          break;
-        }
-      }
+  final firstNorm = data.first
+      .map((c) => c.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim())
+      .toList();
+  final body = data.skip(firstNorm.any(headerWords.contains) ? 1 : 0).toList();
+  var width = 0;
+  for (final r in body) {
+    if (r.length > width) width = r.length;
+  }
+  var bestCol = 0;
+  var bestScore = -1;
+  for (var c = 0; c < width; c++) {
+    var score = 0;
+    for (final r in body) {
+      if (c >= r.length) continue;
+      final n = _cleanImportedName(r[c]);
+      if (_importLooksLikeName(n)) score += n.contains(' ') ? 3 : 2;
     }
-    name = name.replaceAll(RegExp(r'\s+'), ' ').trim();
-    if (name.isNotEmpty) out.add(name);
+    if (score > bestScore) {
+      bestScore = score;
+      bestCol = c;
+    }
+  }
+  for (final r in body) {
+    if (bestCol < r.length) add(r[bestCol]);
   }
   return out;
 }
@@ -3870,57 +4324,102 @@ Future<List<String>?> pickStudentNamesFromFile(BuildContext context) async {
   return names;
 }
 
-// Confirm dialog. Returns the roll number of the first student (default 1), or
-// null.
+// Confirm dialog. Asks for the first roll number (default 1) and returns it,
+// or null if cancelled. It shows the resulting roll range live and warns if
+// some of those roll numbers are already used (existingRolls).
 Future<int?> confirmStudentImport(
-    BuildContext context, List<String> names, String where) {
+  BuildContext context,
+  List<String> names,
+  String where, {
+  Set<String> existingRolls = const <String>{},
+}) {
   final startCtrl = TextEditingController(text: '1');
+  final seen = <String>{};
+  var dupes = 0;
+  for (final n in names) {
+    if (!seen.add(n.toLowerCase())) dupes++;
+  }
   return showDialog<int>(
     context: context,
-    builder: (ctx) => AlertDialog(
-      title: Text('Import ${names.length} student${names.length == 1 ? '' : 's'}'),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Into: $where',
-                style: const TextStyle(color: kMuted, fontSize: 12.5)),
-            const SizedBox(height: 10),
-            for (final n in names.take(3))
-              Text('• $n', maxLines: 1, overflow: TextOverflow.ellipsis),
-            if (names.length > 3)
-              Text('… and ${names.length - 3} more',
-                  style: const TextStyle(color: kMuted)),
-            const SizedBox(height: 14),
-            const Text(
-              'Roll numbers will be given in the same order as the file '
-              '(first name = first roll number).',
-              style: TextStyle(color: kMuted, fontSize: 12.5),
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setS) {
+        final parsed = int.tryParse(startCtrl.text.trim());
+        final int? start = (parsed != null && parsed >= 1) ? parsed : null;
+        var clash = 0;
+        if (start != null) {
+          for (var i = 0; i < names.length; i++) {
+            if (existingRolls.contains((start + i).toString())) clash++;
+          }
+        }
+        return AlertDialog(
+          title: Text(
+              'Import ${names.length} student${names.length == 1 ? '' : 's'}'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Into: $where',
+                    style: const TextStyle(color: kMuted, fontSize: 12.5)),
+                const SizedBox(height: 10),
+                for (final n in names.take(5))
+                  Text('\u2022 $n', maxLines: 1, overflow: TextOverflow.ellipsis),
+                if (names.length > 5)
+                  Text('\u2026 and ${names.length - 5} more',
+                      style: const TextStyle(color: kMuted)),
+                if (dupes > 0) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    '$dupes name${dupes == 1 ? '' : 's'} appear more than once in the file.',
+                    style: const TextStyle(color: kAccent, fontSize: 12.5),
+                  ),
+                ],
+                const SizedBox(height: 14),
+                const Text(
+                  'Roll numbers are given in file order, counting up from '
+                  'the number you enter (first name = first roll number).',
+                  style: TextStyle(color: kMuted, fontSize: 12.5),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: startCtrl,
+                  autofocus: true,
+                  keyboardType: TextInputType.number,
+                  onChanged: (_) => setS(() {}),
+                  decoration: InputDecoration(
+                    labelText: 'First roll number',
+                    errorText:
+                        start != null ? null : 'Enter a number (1 or more)',
+                    helperText: start != null
+                        ? 'Roll $start to ${start + names.length - 1}'
+                        : null,
+                  ),
+                ),
+                if (clash > 0) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    '$clash of these roll numbers already exist. The new '
+                    'students will be added next to them with the same roll '
+                    'number; nothing is overwritten.',
+                    style: const TextStyle(color: kAccent, fontSize: 12.5),
+                  ),
+                ],
+              ],
             ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: startCtrl,
-              keyboardType: TextInputType.number,
-              decoration:
-                  const InputDecoration(labelText: 'First roll number'),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed:
+                  start != null ? () => Navigator.pop(ctx, start) : null,
+              child: const Text('Import'),
             ),
           ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(ctx),
-          child: const Text('Cancel'),
-        ),
-        TextButton(
-          onPressed: () {
-            final v = int.tryParse(startCtrl.text.trim()) ?? 1;
-            Navigator.pop(ctx, v < 1 ? 1 : v);
-          },
-          child: const Text('Import'),
-        ),
-      ],
+        );
+      },
     ),
   );
 }
@@ -4055,12 +4554,13 @@ class ManageStudentsScreen extends StatelessWidget {
   Future<void> _importStudents(BuildContext context) async {
     final names = await pickStudentNamesFromFile(context);
     if (names == null || !context.mounted) return;
-    final start =
-        await confirmStudentImport(context, names, '$semLabel ${sem.section}');
-    if (start == null) return;
-
     final existing = await loadSemesterStudents(sem);
+    if (!context.mounted) return;
     final taken = existing.map((s) => s['roll']!).toSet();
+    final start = await confirmStudentImport(
+        context, names, '$semLabel ${sem.section}',
+        existingRolls: taken.map(rollOf).toSet());
+    if (start == null) return;
     var batch = FirebaseFirestore.instance.batch();
     var ops = 0;
     for (var i = 0; i < names.length; i++) {
@@ -4316,13 +4816,14 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
   Future<void> _importStudents() async {
     final names = await pickStudentNamesFromFile(context);
     if (names == null || !mounted) return;
+    final taken = {..._master.keys, ..._overrides.keys};
     final start = await confirmStudentImport(
-        context, names, '${widget.subjectName} (this subject)');
-    if (start == null) return;
+        context, names, '${widget.subjectName} (this subject)',
+        existingRolls: taken.map(rollOf).toSet());
+    if (start == null || !mounted) return;
 
     final sem = widget.sem;
     final sub = widget.subjectName;
-    final taken = {..._master.keys, ..._overrides.keys};
     var batch = FirebaseFirestore.instance.batch();
     var ops = 0;
     final added = <String, Map<String, String>>{};
@@ -6118,10 +6619,16 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
   void _exportToExcel() async {
     final recs = await loadDateRecords(widget.sem, widget.subjectName);
     final fileBytes = buildAttendanceExcelBytes(
-      subject: widget.subjectName,
+      info: await loadExcelInfo(widget.sem, widget.subjectName),
       recs: recs,
       students: students,
     );
+    if (kIsWeb) {
+      final safeName =
+          widget.subjectName.replaceAll(RegExp(r'[^A-Za-z0-9_\-]+'), '_');
+      downloadBytes(fileBytes!, '${safeName}_Full_Report.xlsx');
+      return;
+    }
     final directory = await getApplicationDocumentsDirectory();
     String filePath = "${directory.path}/${widget.subjectName}_Full_Report.xlsx";
 
@@ -7021,16 +7528,20 @@ class _MonthlyAttendanceScreenState extends State<MonthlyAttendanceScreen> {
         ..sort((a, b) => a.id.compareTo(b.id));
 
       final bytes = buildAttendanceExcelBytes(
-        subject: widget.subjectName,
+        info: await loadExcelInfo(widget.sem, widget.subjectName),
         recs: recs,
         students: _students,
       );
       if (bytes == null) throw Exception('Excel file could not be created');
 
-      final dir = await getApplicationDocumentsDirectory();
       final safeSubject =
           widget.subjectName.replaceAll(RegExp(r'[^A-Za-z0-9_\-]+'), '_');
       final monthKey = DateFormat('yyyy-MM').format(_month);
+      if (kIsWeb) {
+        downloadBytes(bytes, '${safeSubject}_${monthKey}_Monthly_Report.xlsx');
+        return;
+      }
+      final dir = await getApplicationDocumentsDirectory();
       final path = '${dir.path}/${safeSubject}_${monthKey}_Monthly_Report.xlsx';
       File(path)
         ..createSync(recursive: true)
