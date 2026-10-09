@@ -12,7 +12,9 @@ import 'package:sqflite/sqflite.dart' as sql;
 import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:ui' show ImageFilter;
+import 'package:flutter/services.dart';
+import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
 import 'package:file_picker/file_picker.dart';
 import 'package:archive/archive.dart' as zip;
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -22,6 +24,13 @@ import 'download_stub.dart'
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+    statusBarColor: Colors.transparent,
+    statusBarIconBrightness: Brightness.light,
+    statusBarBrightness: Brightness.dark,
+    systemNavigationBarColor: Color(0xFF0E6275),
+    systemNavigationBarIconBrightness: Brightness.light,
+  ));
   // On the web, SQLite runs through the ffi-web factory (IndexedDB based).
   if (kIsWeb) {
     sql.databaseFactory = databaseFactoryFfiWeb;
@@ -74,17 +83,67 @@ const String kHiddenAdminPassword = 'buddy11';
 
 const String kSoftwareEngineeringDeptId = "Software Engineering";
 
-// Theme and colors: dark navy background with one amber accent. Green means
-// present, red means absent.
-const Color kBg = Color(0xFF0F1419);
-const Color kSurface = Color(0xFF171E27);
-const Color kSurfaceHi = Color(0xFF1F2833);
-const Color kOutline = Color(0xFF2A3644);
-const Color kAccent = Color(0xFFF2B544);
-const Color kOnAccent = Color(0xFF1A1405);
-const Color kPresent = Color(0xFF4CC38A);
-const Color kAbsent = Color(0xFFEF6B6B);
-const Color kMuted = Color(0xFF8A97A8);
+// Theme and colors: "Aurora Glass" - deep navy to teal gradient background,
+// frosted glass cards, white pill buttons. Green means present, red means absent.
+const Color kBgTop = Color(0xFF1A1245);
+const Color kBgMid = Color(0xFF10285C);
+const Color kBgBottom = Color(0xFF0E6275);
+const Color kBg = kBgMid;
+const Color kSurface = Color(0xFF10285C); // solid navy: dialogs, menus
+const Color kSurfaceHi = Color(0xFF173A70);
+const Color kGlass = Color(0x1AFFFFFF); // glass card fill (10% white)
+const Color kGlassBorder = Color(0x2EFFFFFF); // glass card border (18% white)
+const Color kOutline = Color(0x33FFFFFF);
+const Color kAccent = Color(0xFF7DD3C0); // light teal: icons, highlights
+const Color kOnAccent = Color(0xFF0D2A66); // dark navy: text on white buttons
+const Color kButton = Colors.white; // primary pill buttons
+const Color kPresent = Color(0xFF6EE7B7);
+const Color kAbsent = Color(0xFFFF8FA0);
+const Color kMuted = Color(0xFFB4C3DC);
+
+const LinearGradient kAuroraGradient = LinearGradient(
+  begin: Alignment.topCenter,
+  end: Alignment.bottomCenter,
+  colors: [kBgTop, kBgMid, kBgBottom],
+);
+
+// Paints the aurora gradient behind a page.
+class AuroraBackground extends StatelessWidget {
+  final Widget child;
+  const AuroraBackground({super.key, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: const BoxDecoration(gradient: kAuroraGradient),
+      child: child,
+    );
+  }
+}
+
+// Pages are transparent, so every route gets its own gradient. This stops the
+// previous page from showing through while a page slides in.
+class _AuroraTransitions extends PageTransitionsBuilder {
+  final PageTransitionsBuilder inner;
+  const _AuroraTransitions(this.inner);
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    return inner.buildTransitions<T>(
+      route,
+      context,
+      animation,
+      secondaryAnimation,
+      AuroraBackground(child: child),
+    );
+  }
+}
 
 class AttendanceApp extends StatelessWidget {
   const AttendanceApp({super.key});
@@ -97,20 +156,50 @@ class AttendanceApp extends StatelessWidget {
     ).copyWith(
       primary: kAccent,
       onPrimary: kOnAccent,
+      secondary: kAccent,
       surface: kSurface,
+      onSurface: Colors.white,
+      outline: kOutline,
+      error: kAbsent,
     );
+    const pillShape = StadiumBorder();
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'SAM',
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: scheme,
-        scaffoldBackgroundColor: kBg,
+        scaffoldBackgroundColor: Colors.transparent,
+        canvasColor: kSurface,
+        dividerColor: kOutline,
+        pageTransitionsTheme: const PageTransitionsTheme(
+          builders: {
+            TargetPlatform.android:
+                _AuroraTransitions(ZoomPageTransitionsBuilder()),
+            TargetPlatform.iOS:
+                _AuroraTransitions(CupertinoPageTransitionsBuilder()),
+            TargetPlatform.macOS:
+                _AuroraTransitions(CupertinoPageTransitionsBuilder()),
+            TargetPlatform.windows:
+                _AuroraTransitions(ZoomPageTransitionsBuilder()),
+            TargetPlatform.linux:
+                _AuroraTransitions(ZoomPageTransitionsBuilder()),
+            TargetPlatform.fuchsia:
+                _AuroraTransitions(ZoomPageTransitionsBuilder()),
+          },
+        ),
         appBarTheme: const AppBarTheme(
-          backgroundColor: kBg,
+          backgroundColor: Colors.transparent,
           surfaceTintColor: Colors.transparent,
+          foregroundColor: Colors.white,
           elevation: 0,
+          scrolledUnderElevation: 0,
           centerTitle: false,
+          systemOverlayStyle: SystemUiOverlayStyle(
+            statusBarColor: Colors.transparent,
+            statusBarIconBrightness: Brightness.light,
+            statusBarBrightness: Brightness.dark,
+          ),
           titleTextStyle: TextStyle(
             fontSize: 20,
             fontWeight: FontWeight.w700,
@@ -119,15 +208,131 @@ class AttendanceApp extends StatelessWidget {
         ),
         elevatedButtonTheme: ElevatedButtonThemeData(
           style: ElevatedButton.styleFrom(
-            backgroundColor: kAccent,
+            backgroundColor: kButton,
             foregroundColor: kOnAccent,
+            disabledBackgroundColor: const Color(0x33FFFFFF),
+            disabledForegroundColor: const Color(0x80FFFFFF),
             elevation: 0,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
-            ),
+            shape: pillShape,
           ),
         ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            foregroundColor: Colors.white,
+            backgroundColor: const Color(0x0FFFFFFF),
+            side: const BorderSide(color: Color(0x4DFFFFFF)),
+            shape: pillShape,
+          ),
+        ),
+        textButtonTheme: TextButtonThemeData(
+          style: TextButton.styleFrom(foregroundColor: kAccent),
+        ),
+        floatingActionButtonTheme: const FloatingActionButtonThemeData(
+          backgroundColor: kButton,
+          foregroundColor: kOnAccent,
+          elevation: 0,
+          focusElevation: 0,
+          hoverElevation: 0,
+          highlightElevation: 0,
+          shape: StadiumBorder(),
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: kGlass,
+          labelStyle: const TextStyle(color: kMuted),
+          hintStyle: const TextStyle(color: Color(0x80FFFFFF)),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: const BorderSide(color: kGlassBorder),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: const BorderSide(color: kGlassBorder),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(16),
+            borderSide: const BorderSide(color: kAccent, width: 1.5),
+          ),
+        ),
+        dialogTheme: DialogThemeData(
+          backgroundColor: kSurface,
+          surfaceTintColor: Colors.transparent,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+            side: const BorderSide(color: kGlassBorder),
+          ),
+        ),
+        snackBarTheme: SnackBarThemeData(
+          backgroundColor: kSurfaceHi,
+          contentTextStyle: const TextStyle(color: Colors.white),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+        ),
+        popupMenuTheme: PopupMenuThemeData(
+          color: kSurface,
+          surfaceTintColor: Colors.transparent,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: const BorderSide(color: kGlassBorder),
+          ),
+        ),
+        bottomSheetTheme: const BottomSheetThemeData(
+          backgroundColor: kSurface,
+          surfaceTintColor: Colors.transparent,
+        ),
+        datePickerTheme: const DatePickerThemeData(
+          backgroundColor: kSurface,
+          surfaceTintColor: Colors.transparent,
+        ),
+        timePickerTheme: const TimePickerThemeData(
+          backgroundColor: kSurface,
+        ),
+        tabBarTheme: const TabBarThemeData(
+          labelColor: Colors.white,
+          unselectedLabelColor: kMuted,
+          indicatorColor: kAccent,
+          dividerColor: Colors.transparent,
+        ),
+        segmentedButtonTheme: SegmentedButtonThemeData(
+          style: ButtonStyle(
+            backgroundColor: WidgetStateProperty.resolveWith((states) =>
+                states.contains(WidgetState.selected)
+                    ? const Color(0x40FFFFFF)
+                    : Colors.transparent),
+            foregroundColor: WidgetStateProperty.all(Colors.white),
+            side: WidgetStateProperty.all(
+                const BorderSide(color: Color(0x4DFFFFFF))),
+          ),
+        ),
+        switchTheme: SwitchThemeData(
+          thumbColor: WidgetStateProperty.all(Colors.white),
+          trackColor: WidgetStateProperty.resolveWith((states) =>
+              states.contains(WidgetState.selected)
+                  ? kAccent
+                  : const Color(0x33FFFFFF)),
+        ),
+        checkboxTheme: CheckboxThemeData(
+          fillColor: WidgetStateProperty.resolveWith((states) =>
+              states.contains(WidgetState.selected)
+                  ? kAccent
+                  : Colors.transparent),
+          checkColor: WidgetStateProperty.all(kOnAccent),
+          side: const BorderSide(color: Color(0x80FFFFFF), width: 1.5),
+        ),
+        progressIndicatorTheme: const ProgressIndicatorThemeData(
+          color: kAccent,
+          linearTrackColor: kOutline,
+        ),
+        listTileTheme: const ListTileThemeData(
+          textColor: Colors.white,
+          iconColor: kAccent,
+        ),
+        dividerTheme: const DividerThemeData(color: kOutline),
       ),
+      builder: (context, child) =>
+          AuroraBackground(child: child ?? const SizedBox.shrink()),
       home: const RootGate(),
     );
   }
@@ -139,31 +344,87 @@ class AppCard extends StatelessWidget {
   final VoidCallback? onTap;
   final EdgeInsetsGeometry padding;
   final EdgeInsetsGeometry margin;
+  final double radius;
+  final double blur;
   const AppCard({
     super.key,
     required this.child,
     this.onTap,
     this.padding = const EdgeInsets.all(14),
     this.margin = const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+    this.radius = 20,
+    this.blur = 10,
   });
 
   @override
   Widget build(BuildContext context) {
+    final r = BorderRadius.circular(radius);
     return Padding(
       padding: margin,
-      child: Material(
-        color: kSurface,
-        borderRadius: BorderRadius.circular(16),
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(16),
-          child: Ink(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: kOutline),
+      child: ClipRRect(
+        borderRadius: r,
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
+          child: Material(
+            color: kGlass,
+            child: InkWell(
+              onTap: onTap,
+              child: Ink(
+                decoration: BoxDecoration(
+                  borderRadius: r,
+                  border: Border.all(color: kGlassBorder),
+                ),
+                padding: padding,
+                child: child,
+              ),
             ),
-            padding: padding,
-            child: child,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// Round P / A button used on the attendance screen.
+class AttendanceChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final Color color;
+  final VoidCallback? onTap;
+  const AttendanceChip({
+    super.key,
+    required this.label,
+    required this.selected,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Opacity(
+      opacity: onTap == null ? 0.55 : 1,
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          width: 42,
+          height: 42,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: selected ? color : Colors.transparent,
+            border: Border.all(
+              color: selected ? color : const Color(0x4DFFFFFF),
+              width: 1.2,
+            ),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontWeight: FontWeight.w800,
+              fontSize: 15,
+              color: selected ? kOnAccent : const Color(0xB3FFFFFF),
+            ),
           ),
         ),
       ),
@@ -420,72 +681,78 @@ class WelcomeScreen extends StatelessWidget {
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(28),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                // SAM logo: dark navy tile + golden check mark (same as app icon)
-                Container(
-                  width: 96,
-                  height: 96,
-                  decoration: BoxDecoration(
-                    gradient: const LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [Color(0xFF14284A), Color(0xFF0A1428)],
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: AppCard(
+                radius: 32,
+                blur: 16,
+                margin: EdgeInsets.zero,
+                padding: const EdgeInsets.fromLTRB(24, 36, 24, 28),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // SAM logo: glass tile + graduation cap
+                    Container(
+                      width: 96,
+                      height: 96,
+                      decoration: BoxDecoration(
+                        color: const Color(0x1FFFFFFF),
+                        borderRadius: BorderRadius.circular(28),
+                        border: Border.all(color: const Color(0x40FFFFFF)),
+                      ),
+                      child: const Icon(Icons.school_rounded,
+                          color: Colors.white, size: 56),
                     ),
-                    borderRadius: BorderRadius.circular(26),
-                    border: Border.all(color: kAccent.withValues(alpha: 0.35)),
-                  ),
-                  child: const Icon(Icons.check_rounded, color: kAccent, size: 60),
-                ),
-                const SizedBox(height: 22),
-                const Text('SAM',
-                    style: TextStyle(
-                        fontSize: 34,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 6)),
-                const SizedBox(height: 6),
-                const Text('Departments, subjects and daily attendance',
-                    style: TextStyle(color: kMuted)),
-                const SizedBox(height: 40),
-                SizedBox(
-                  width: double.infinity,
-                  height: 54,
-                  child: ElevatedButton.icon(
-                    onPressed: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                          builder: (_) => const AdminLoginScreen()),
-                    ),
-                    icon: const Icon(Icons.admin_panel_settings_outlined),
-                    label: const Text('Admin Login',
+                    const SizedBox(height: 22),
+                    const Text('SAM',
                         style: TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.w700)),
-                  ),
-                ),
-                const SizedBox(height: 14),
-                SizedBox(
-                  width: double.infinity,
-                  height: 54,
-                  child: OutlinedButton.icon(
-                    onPressed: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                          builder: (_) => const TeacherAuthScreen()),
-                    ),
-                    style: OutlinedButton.styleFrom(
-                      side: const BorderSide(color: kOutline),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14)),
-                    ),
-                    icon: const Icon(Icons.person_outline),
-                    label: const Text('Teacher Login / Sign Up',
+                            fontSize: 36,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 10)),
+                    const SizedBox(height: 8),
+                    Text('डिपार्टमेंट और अटेंडेंस, एक ही जगह',
+                        textAlign: TextAlign.center,
                         style: TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.w600)),
-                  ),
+                            color: kAccent.withValues(alpha: 0.95),
+                            fontSize: 15,
+                            fontWeight: FontWeight.w300,
+                            letterSpacing: 1.2)),
+                    const SizedBox(height: 36),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 54,
+                      child: ElevatedButton.icon(
+                        onPressed: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                              builder: (_) => const AdminLoginScreen()),
+                        ),
+                        icon: const Icon(Icons.admin_panel_settings_outlined),
+                        label: const Text('Admin Login',
+                            style: TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.w700)),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 54,
+                      child: OutlinedButton.icon(
+                        onPressed: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                              builder: (_) => const TeacherAuthScreen()),
+                        ),
+                        icon: const Icon(Icons.person_outline),
+                        label: const Text('Teacher Login / Sign Up',
+                            style: TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.w600)),
+                      ),
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
         ),
@@ -2291,6 +2558,248 @@ Future<void> deleteAllAttendanceEverywhere() async {
   await LocalDb.deleteAllAttendance();
 }
 
+// ---------------------------------------------------------------------------
+// Backup & restore
+// Backup: every document of the app is read from Firestore and written into one
+// JSON file (kept on the phone, or downloaded on the web).
+// Restore: the JSON file is read back and every document is written to its
+// original path. Documents that are not in the file are left alone, so a
+// restore never deletes anything. Running it twice is harmless.
+// ---------------------------------------------------------------------------
+const String kBackupFormat = 'attendance_backup_v1';
+const List<String> _kBackupRoots = ['departments', 'teachers', 'settings', 'meta'];
+const List<String> _kBackupGroups = [
+  'sections',
+  'semesters',
+  'students',
+  'subjects',
+  'overrides',
+  'dates',
+  'claims',
+];
+
+dynamic _bkEncode(dynamic v) {
+  if (v is Timestamp) {
+    return {'__t': 'ts', 's': v.seconds, 'n': v.nanoseconds};
+  }
+  if (v is GeoPoint) {
+    return {'__t': 'geo', 'lat': v.latitude, 'lng': v.longitude};
+  }
+  if (v is DocumentReference) return {'__t': 'ref', 'p': v.path};
+  if (v is Blob) return {'__t': 'bytes', 'b': base64Encode(v.bytes)};
+  if (v is Map) {
+    return v.map((k, val) => MapEntry(k.toString(), _bkEncode(val)));
+  }
+  if (v is Iterable) return v.map(_bkEncode).toList();
+  return v;
+}
+
+dynamic _bkDecode(dynamic v) {
+  if (v is Map) {
+    final t = v['__t'];
+    if (t == 'ts') return Timestamp(v['s'] as int, v['n'] as int);
+    if (t == 'geo') {
+      return GeoPoint((v['lat'] as num).toDouble(), (v['lng'] as num).toDouble());
+    }
+    if (t == 'ref') return FirebaseFirestore.instance.doc(v['p'] as String);
+    if (t == 'bytes') return Blob(base64Decode(v['b'] as String));
+    return v.map((k, val) => MapEntry(k.toString(), _bkDecode(val)));
+  }
+  if (v is List) return v.map(_bkDecode).toList();
+  return v;
+}
+
+Future<Map<String, dynamic>> _collectBackup() async {
+  final fs = FirebaseFirestore.instance;
+  const t = Duration(seconds: 60);
+  final docs = <String, dynamic>{};
+  void addAll(QuerySnapshot<Map<String, dynamic>> snap) {
+    // A cached answer would give an incomplete backup, so refuse it.
+    if (snap.metadata.isFromCache) throw Exception('Server not reachable');
+    for (final d in snap.docs) {
+      docs[d.reference.path] = _bkEncode(d.data());
+    }
+  }
+
+  for (final c in _kBackupRoots) {
+    addAll(await fs.collection(c).get().timeout(t));
+  }
+  for (final g in _kBackupGroups) {
+    addAll(await fs.collectionGroup(g).get().timeout(t));
+  }
+  return {
+    'format': kBackupFormat,
+    'created': DateTime.now().toIso8601String(),
+    'count': docs.length,
+    'docs': docs,
+  };
+}
+
+// Creates the backup file and saves/shares it. Returns the number of records.
+Future<int> createBackupFile() async {
+  final data = await _collectBackup();
+  final bytes = Uint8List.fromList(utf8.encode(jsonEncode(data)));
+  final name =
+      'attendance_backup_${DateFormat('yyyy-MM-dd_HH-mm').format(DateTime.now())}.json';
+  if (kIsWeb) {
+    downloadBytes(bytes, name);
+    return data['count'] as int;
+  }
+  final dir = await getApplicationDocumentsDirectory();
+  final path = '${dir.path}/$name';
+  await File(path).writeAsBytes(bytes);
+  await SharePlus.instance.share(ShareParams(
+    files: [XFile(path)],
+    text: 'Attendance backup',
+  ));
+  return data['count'] as int;
+}
+
+Future<void> runBackupWithUi(BuildContext context) async {
+  if ((await _netState()) != _Net.reachable) {
+    if (!context.mounted) return;
+    showSnack(context, 'Internet is required to take a backup.',
+        color: kAbsent);
+    return;
+  }
+  if (context.mounted) showSnack(context, 'Preparing backup...');
+  try {
+    final n = await createBackupFile();
+    if (context.mounted) showSnack(context, 'Backup ready ($n records)');
+  } catch (e) {
+    debugPrint('Backup error: $e');
+    if (context.mounted) {
+      showSnack(context, 'Backup failed. Check your internet and try again.',
+          color: kAbsent);
+    }
+  }
+}
+
+bool _bkPathOk(String path) {
+  final parts = path.split('/');
+  return parts.length.isEven &&
+      parts.every((p) => p.isNotEmpty) &&
+      _kBackupRoots.contains(parts.first);
+}
+
+Future<void> restoreFromBackupUi(BuildContext context) async {
+  PlatformFile? f;
+  try {
+    f = await FilePicker.pickFile(
+      type: FileType.custom,
+      allowedExtensions: ['json'],
+    );
+  } catch (e) {
+    debugPrint('File picker error: $e');
+    if (context.mounted) {
+      showSnack(context, 'Could not open the file picker.', color: kAbsent);
+    }
+    return;
+  }
+  if (f == null) return;
+
+  Map<String, dynamic> docs;
+  String created = '';
+  try {
+    final bytes = await f.readAsBytes();
+    final m = jsonDecode(utf8.decode(bytes));
+    if (m is! Map || m['format'] != kBackupFormat || m['docs'] is! Map) {
+      throw const FormatException('not a backup');
+    }
+    docs = Map<String, dynamic>.from(m['docs'] as Map);
+    created = (m['created'] ?? '').toString();
+    if (docs.keys.any((p) => !_bkPathOk(p))) {
+      throw const FormatException('bad path');
+    }
+  } catch (_) {
+    if (context.mounted) {
+      showSnack(context, 'This is not a valid backup file.', color: kAbsent);
+    }
+    return;
+  }
+  if (!context.mounted) return;
+
+  String when = created;
+  try {
+    when = DateFormat('d MMM yyyy, h:mm a').format(DateTime.parse(created));
+  } catch (_) {}
+
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Restore this backup?'),
+      content: Text(
+        'Backup taken: $when\nRecords in file: ${docs.length}\n\n'
+        'Every record in the file is written back to the server and replaces the current version of that record. '
+        'Records that are not in the file are not deleted. Internet is required.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, false),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, true),
+          child: const Text('Restore'),
+        ),
+      ],
+    ),
+  );
+  if (ok != true || !context.mounted) return;
+
+  if ((await _netState()) != _Net.reachable) {
+    if (context.mounted) {
+      showSnack(context, 'Internet is required to restore.', color: kAbsent);
+    }
+    return;
+  }
+
+  showDialog(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => const AlertDialog(
+      content: Row(
+        children: [
+          SizedBox(
+              height: 22,
+              width: 22,
+              child: CircularProgressIndicator(strokeWidth: 2)),
+          SizedBox(width: 16),
+          Text('Restoring...'),
+        ],
+      ),
+    ),
+  );
+
+  bool success = false;
+  try {
+    final fs = FirebaseFirestore.instance;
+    final entries = docs.entries.toList();
+    for (int i = 0; i < entries.length; i += 400) {
+      final batch = fs.batch();
+      for (final e in entries.skip(i).take(400)) {
+        batch.set(fs.doc(e.key),
+            Map<String, dynamic>.from(_bkDecode(e.value) as Map));
+      }
+      await batch.commit().timeout(const Duration(seconds: 30));
+    }
+    success = true;
+    await syncLocalDbIfStale(force: true);
+  } catch (e) {
+    debugPrint('Restore error: $e');
+  }
+
+  if (!context.mounted) return;
+  Navigator.of(context, rootNavigator: true).pop();
+  showSnack(
+    context,
+    success
+        ? 'Restore complete'
+        : 'Restore did not finish. Check your internet and run it again.',
+    color: success ? null : kAbsent,
+  );
+}
+
 // One-time migration of the old Software Engineering data
 //   -> Software Engineering / Section A / Semester 3
 // The old data is copied, not deleted, so this is safe. Running it again
@@ -3358,6 +3867,7 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
   void _confirmDeleteOverallAttendance() {
     bool busy = false;
     String? errorText;
+    String? backupNote;
 
     showDialog(
       context: context,
@@ -3372,6 +3882,22 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
               const Text(
                 'This permanently deletes the attendance records of EVERY subject in every department: from the server (Firebase), the local SQLite database and this device.\n\nDepartments, subjects and students are not touched. This cannot be undone.',
               ),
+              const Padding(
+                padding: EdgeInsets.only(top: 10),
+                child: Text(
+                  'Note: take a backup first, so you can restore it if this was a mistake.',
+                  style: TextStyle(
+                      color: kAccent,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600),
+                ),
+              ),
+              if (backupNote != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(backupNote!,
+                      style: const TextStyle(color: kPresent, fontSize: 13)),
+                ),
               if (errorText != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 10),
@@ -3384,6 +3910,34 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
             TextButton(
               onPressed: busy ? null : () => Navigator.pop(dialogContext),
               child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: busy
+                  ? null
+                  : () async {
+                      setDialogState(() {
+                        busy = true;
+                        errorText = null;
+                        backupNote = null;
+                      });
+                      try {
+                        if ((await _netState()) != _Net.reachable) {
+                          throw Exception('offline');
+                        }
+                        final n = await createBackupFile();
+                        setDialogState(() {
+                          busy = false;
+                          backupNote = 'Backup ready ($n records).';
+                        });
+                      } catch (_) {
+                        setDialogState(() {
+                          busy = false;
+                          errorText =
+                              'Backup failed. Check your internet and try again.';
+                        });
+                      }
+                    },
+              child: const Text('Backup now'),
             ),
             TextButton(
               onPressed: busy
@@ -3476,6 +4030,40 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
     );
   }
 
+  void _showBackupRestore() {
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Backup & Restore'),
+        content: const Text(
+          'Backup saves all departments, subjects, students, teachers and attendance into one file that you can keep safely (phone, Google Drive, email).\n\n'
+          'Restore reads that file and puts the data back if something was deleted by mistake.\n\n'
+          'The file contains teacher passwords, so keep it private.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Close'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(dialogContext);
+              if (mounted) restoreFromBackupUi(context);
+            },
+            child: const Text('Restore'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(dialogContext);
+              if (mounted) runBackupWithUi(context);
+            },
+            child: const Text('Backup'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final claim = widget.claimMode;
@@ -3490,6 +4078,12 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
               onPressed: _showMasterSwitch,
             ),
           if (_isAdmin && !claim) const TeacherRequestsButton(),
+          if (_isAdmin && !claim)
+            IconButton(
+              icon: const Icon(Icons.backup_outlined),
+              tooltip: 'Backup & Restore',
+              onPressed: _showBackupRestore,
+            ),
           if (_isAdmin && !claim)
             IconButton(
               icon: const Icon(Icons.delete_sweep_outlined, color: kAbsent),
@@ -3507,7 +4101,7 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
       floatingActionButton: (_isAdmin && !claim)
           ? FloatingActionButton(
               onPressed: _showAddDepartmentDialog,
-              backgroundColor: kAccent,
+              backgroundColor: kButton,
               foregroundColor: kOnAccent,
               child: const Icon(Icons.add),
             )
@@ -3899,7 +4493,7 @@ class SubjectsScreen extends StatelessWidget {
       floatingActionButton: isAdmin
           ? FloatingActionButton(
               onPressed: () => _showAddSubjectDialog(context),
-              backgroundColor: kAccent,
+              backgroundColor: kButton,
               foregroundColor: kOnAccent,
               child: const Icon(Icons.add),
             )
@@ -4805,7 +5399,7 @@ class ManageStudentsScreen extends StatelessWidget {
       ),
       floatingActionButton: FloatingActionButton(
         onPressed: () => _showStudentDialog(context),
-        backgroundColor: kAccent,
+        backgroundColor: kButton,
         foregroundColor: kOnAccent,
         child: const Icon(Icons.person_add_alt_1),
       ),
@@ -5082,7 +5676,7 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
       ),
       floatingActionButton: FloatingActionButton(
         onPressed: _addStudent,
-        backgroundColor: kAccent,
+        backgroundColor: kButton,
         foregroundColor: kOnAccent,
         child: const Icon(Icons.person_add_alt_1),
       ),
@@ -7068,20 +7662,33 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                                       ],
                                     ),
                                   ),
-                                  SegmentedButton<String>(
-                                    showSelectedIcon: false,
-                                    segments: const [
-                                      ButtonSegment(value: 'P', label: Text('P')),
-                                      ButtonSegment(value: 'A', label: Text('A')),
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      AttendanceChip(
+                                        label: 'P',
+                                        selected:
+                                            (attendanceStatus[roll] ?? 'P') ==
+                                                'P',
+                                        color: kPresent,
+                                        onTap: canEdit
+                                            ? () => setState(() =>
+                                                attendanceStatus[roll] = 'P')
+                                            : null,
+                                      ),
+                                      const SizedBox(width: 8),
+                                      AttendanceChip(
+                                        label: 'A',
+                                        selected:
+                                            (attendanceStatus[roll] ?? 'P') ==
+                                                'A',
+                                        color: kAbsent,
+                                        onTap: canEdit
+                                            ? () => setState(() =>
+                                                attendanceStatus[roll] = 'A')
+                                            : null,
+                                      ),
                                     ],
-                                    selected: {attendanceStatus[roll] ?? 'P'},
-                                    onSelectionChanged: canEdit
-                                        ? (Set<String> newSelection) {
-                                            setState(() {
-                                              attendanceStatus[roll] = newSelection.first;
-                                            });
-                                          }
-                                        : null,
                                   ),
                                 ],
                               ),
@@ -7101,7 +7708,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                             child: ElevatedButton(
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: kAbsent,
-                                foregroundColor: Colors.white,
+                                foregroundColor: kOnAccent,
                               ),
                               onPressed: () {
                                 showDialog(
@@ -7367,9 +7974,9 @@ class _StudentStatCardState extends State<StudentStatCard> {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
       decoration: BoxDecoration(
-        color: kSurface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: kOutline),
+        color: kGlass,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: kGlassBorder),
       ),
       child: Material(
         color: Colors.transparent,
