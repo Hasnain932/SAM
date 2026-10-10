@@ -49,8 +49,7 @@ void main() async {
     ),
   );
 
-  // Keep a copy of the data on the device. Changes made offline sync
-  // automatically once the internet is back.
+  // Keep a local copy of the data. Offline changes sync when back online.
   FirebaseFirestore.instance.settings = const Settings(
     persistenceEnabled: true,
     cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED,
@@ -71,22 +70,20 @@ const int kMarkWindowMinutes = 20;
 const int kPickerStartHour = 6;
 const int kPickerEndHour = 18;
 
-// Lets people create a new admin account on the Admin Login screen. It is false
-// because teachers also sign up in this app, and otherwise any teacher could
-// become an admin. Create new admins from the Firebase console.
+// Allows creating new admins from the Admin Login screen. Off, because teachers
+// also sign up in this app. Create admins in the Firebase console.
 const bool kAllowAdminSignUp = false;
 
 // ---- Second (hidden) admin ----
-// Stored like a normal department. The app finds this admin only by matching
-// the username. You can change the department name to anything ordinary.
+// Stored like a normal department and found only by username.
 const String kHiddenAdminDeptName = 'Information Technology';
 const String kHiddenAdminUsername = 'BUDDY';
 const String kHiddenAdminPassword = 'buddy11';
 
 const String kSoftwareEngineeringDeptId = "Software Engineering";
 
-// Theme and colors: "Aurora Glass" - deep navy to teal gradient background,
-// frosted glass cards, white pill buttons. Green means present, red means absent.
+// Theme: deep navy-to-teal gradient, frosted glass cards, white pill buttons.
+// Green = present, red = absent.
 const Color kBgTop = Color(0xFF1A1245);
 const Color kBgMid = Color(0xFF10285C);
 const Color kBgBottom = Color(0xFF0E6275);
@@ -139,8 +136,7 @@ class _WebFadeTransitions extends PageTransitionsBuilder {
   }
 }
 
-// Pages are transparent, so every route gets its own gradient. This stops the
-// previous page from showing through while a page slides in.
+// Each route paints its own gradient so the previous page doesn't show through.
 class _AuroraTransitions extends PageTransitionsBuilder {
   final PageTransitionsBuilder inner;
   const _AuroraTransitions(this.inner);
@@ -411,8 +407,7 @@ class AppCard extends StatelessWidget {
       padding: margin,
       child: ClipRRect(
         borderRadius: r,
-        // Web: no blur. BackdropFilter per card makes the page slow there, and
-        // on this smooth gradient background the blur is hardly visible anyway.
+        // Web: no blur (a BackdropFilter per card is slow, and barely visible here).
         child: kIsWeb
             ? card
             : BackdropFilter(
@@ -612,8 +607,8 @@ class AppSession {
     } catch (_) {}
   }
 
-  // Best effort: if the Firestore rules need request.auth != null, an anonymous
-  // sign-in lets teachers and the second admin through.
+  // Best effort: anonymous sign-in lets teachers and the second admin pass
+  // Firestore rules that need request.auth != null.
   static Future<void> _anon() async {
     try {
       if (FirebaseAuth.instance.currentUser == null) {
@@ -675,8 +670,7 @@ class RootGate extends StatelessWidget {
       valueListenable: AppSession.tick,
       builder: (context, _, _) {
         return StreamBuilder<User?>(
-          // initialData: the saved login is known immediately, so there is
-          // no spinner on start-up (important when the phone is offline).
+          // initialData: the saved login is known instantly, so there is no spinner offline.
           initialData: FirebaseAuth.instance.currentUser,
           stream: FirebaseAuth.instance.authStateChanges(),
           builder: (context, snapshot) {
@@ -848,8 +842,7 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
         await AppSession.clearForFirebaseAdmin();
         if (mounted) Navigator.of(context).popUntil((r) => r.isFirst);
       } else {
-        // ---- Second admin: username/password from the departments collection
-        // ----
+        // ---- Second admin: username/password from departments ----
         final ok = await _checkHiddenAdmin(id, password);
         if (ok) {
           await AppSession.loginHiddenAdmin();
@@ -1039,10 +1032,9 @@ class _TeacherAuthScreenState extends State<TeacherAuthScreen> {
           setState(() => _error = 'Incorrect username or password');
           return;
         }
-        // Approval is checked only here, at login. Once approved, the saved
-        // local session is used and the server is never asked again.
-        // Teachers without a status (created before this feature) count as
-        // approved.
+        // Approval is checked only at login. After approval, the saved local session
+        // is used and the server is never asked again. Accounts with no status
+        // (created before this feature) count as approved.
         final status = teacherStatusOf(data);
         if (status == 'pending') {
           setState(() =>
@@ -1180,8 +1172,8 @@ class _TeacherAuthScreenState extends State<TeacherAuthScreen> {
 
 // ---------------------------------------------------------------------------
 // Teacher approval
-// Status is stored at teachers/{id}.status: 'pending' | 'approved' | 'denied'.
-// Teachers without a status (created before this feature) count as approved.
+// Status at teachers/{id}.status: 'pending' | 'approved' | 'denied'.
+// No status (older accounts) counts as approved.
 // ---------------------------------------------------------------------------
 String teacherStatusOf(Map<String, dynamic> data) {
   final s = (data['status'] ?? 'approved').toString();
@@ -1222,8 +1214,7 @@ class TeacherRequestsScreen extends StatelessWidget {
   const TeacherRequestsScreen({super.key});
 
   void _setStatus(BuildContext context, String id, String status) {
-    // Not awaited: set() does not complete while offline. The list updates
-    // from the local cache right away and syncs when internet is back.
+    // Not awaited: set() never completes offline. The list updates from the local cache.
     unawaited(FirebaseFirestore.instance
         .collection('teachers')
         .doc(id)
@@ -1450,9 +1441,8 @@ DocumentReference<Map<String, dynamic>> permissionsRef() =>
     FirebaseFirestore.instance.collection('settings').doc('permissions');
 
 // ---- Teacher permissions (settings/permissions) ----
-// kPermMaster is the master switch: when ON, teachers can do everything.
-// When it is OFF, each of the detailed permissions below applies on its own.
-// A missing field means "not allowed", so nothing changes for old data.
+// kPermMaster ON: teachers can do everything. OFF: each permission below applies
+// on its own. A missing field means "not allowed".
 const String kPermMaster = 'teachers_unrestricted';
 const String kPermAnytime = 'perm_anytime'; // mark outside the 20-minute window
 const String kPermChangeTime = 'perm_change_time'; // pick the class time
@@ -1544,16 +1534,14 @@ CollectionReference<Map<String, dynamic>> legacyDatesRef(
 
 // Offline-safe read helpers
 const Duration _kNetworkTimeout = Duration(seconds: 2);
-// Web: do not make every screen wait for the server. After this time the
-// cached copy is shown (the server read keeps running and refreshes the cache).
+// Web: don't make screens wait for the server. After this time, show the cache
+// (the server read keeps running and refreshes it).
 const Duration _kReadTimeout =
     kIsWeb ? Duration(milliseconds: 900) : _kNetworkTimeout;
 
-// Wi-Fi being connected does not always mean the internet works. _netState()
-// adds a quick DNS check (cached for a few seconds). When the phone is
-// connected but offline, we go straight to the local cache instead of waiting
-// for a timeout on every screen. That waiting was the cause of the endless
-// loading.
+// Wi-Fi connected doesn't always mean the internet works. _netState() adds a quick
+// DNS check (cached for a few seconds). When offline, go straight to the cache
+// instead of waiting for a timeout, which caused endless loading.
 enum _Net { none, unreachable, reachable }
 
 _Net? _netCache;
@@ -1581,8 +1569,7 @@ Future<_Net> _netState() async {
         : const Duration(seconds: 4);
     if (DateTime.now().difference(_netCacheAt) < ttl) return cached;
   }
-  // InternetAddress.lookup is not available on the web; the connectivity
-  // check above is enough there.
+  // InternetAddress.lookup isn't available on web; the check above is enough.
   if (kIsWeb) {
     _netCache = _Net.reachable;
     _netCacheAt = DateTime.now();
@@ -1657,8 +1644,7 @@ Future<QuerySnapshot<Map<String, dynamic>>> safeGetQuery(
     } catch (_) {}
     final cached = await query.get(cacheOnly);
     if (cached.docs.isNotEmpty) return cached;
-    // Nothing cached: wait a bit longer for the server instead of showing an
-    // empty list.
+    // Nothing cached: wait a bit longer for the server instead of showing an empty list.
     try {
       return await server.timeout(const Duration(seconds: 8));
     } catch (_) {
@@ -1690,8 +1676,7 @@ Future<_QRes> _safeQuery(Query<Map<String, dynamic>> query) async {
   }
 }
 
-// Cache-first live query for StreamBuilders. The first result comes from the
-// device cache right away, then live updates take over.
+// Cache-first live query for StreamBuilders: device cache first, then live updates.
 Stream<QuerySnapshot<Map<String, dynamic>>> liveQuery(
     Query<Map<String, dynamic>> q) {
   late final StreamController<QuerySnapshot<Map<String, dynamic>>> ctrl;
@@ -1717,8 +1702,7 @@ Stream<QuerySnapshot<Map<String, dynamic>>> liveQuery(
             ctrl.add(cached);
             return;
           }
-          // Empty cache: give the live stream a moment, then show the empty
-          // result instead of loading forever.
+          // Empty cache: give the live stream a moment, then show the empty result.
           await Future.delayed(const Duration(milliseconds: 1500));
           if (!gotLive && !cancelled) ctrl.add(cached);
         } catch (_) {}
@@ -1775,19 +1759,15 @@ String fmtHhmm(String? s) {
 }
 
 // ---- Shared Excel layout ----
-// Both the monthly and overall exports use this layout:
-//   top info section (Program / Semester / Instructor / Course / Section /
-//   Marks), then three header rows (Week, Date, Class No.), then the students.
-// Attendance is stored as 1 (present) / 0 (absent). Total Classes, Total
-// Present, Percentage and Marks are Excel formulas, so they follow any edit.
+// Both exports use this layout: info section (Program, Semester, Instructor,
+// Course, Section, Marks), three header rows (Week, Date, Class No.), then students.
+// Attendance is 1 (present) / 0 (absent). Totals, Percentage and Marks are formulas.
 
-// Total attendance marks of a course. It is only the starting value of the
-// "Marks" cell in the sheet; the formulas read that cell, so it can be changed
-// per course directly in Excel.
+// Default attendance marks. Only the starting value of the "Marks" cell; the
+// formulas read that cell, so it can be changed per course in Excel.
 const double kDefaultAttendanceMarks = 5;
 
-// Details shown in the top info section. Nothing is hardcoded: everything
-// comes from the semester / subject that is being exported.
+// Info section details. Nothing is hardcoded; all values come from the export.
 class ExcelInfo {
   final String program;
   final String semester;
@@ -1860,10 +1840,8 @@ String _ordinal(int n) {
 }
 
 // ---- Direct .xlsx writer ----
-// The excel package was dropping styles / merges on some builds (that is why
-// the title, "Week N" and the info section never looked centered or big).
-// The sheet is now written straight as xlsx XML, so every style, merge, width
-// and row height is exactly what is set below.
+// The excel package dropped styles and merges on some builds, so the sheet is
+// written directly as xlsx XML. Styles, merges, widths and heights are exact.
 class _XlsxBuilder {
   final List<String> _fonts = [
     '<font><sz val="11"/><name val="Calibri"/><family val="2"/></font>'
@@ -2058,10 +2036,32 @@ class _XlsxBuilder {
   }
 }
 
+// Asks which format the Excel file should use.
+// true = P / A letters, false = 1 / 0 digits, null = cancelled.
+Future<bool?> askExportFormat(BuildContext context) {
+  return showDialog<bool>(
+    context: context,
+    builder: (ctx) => SimpleDialog(
+      title: const Text('Export format'),
+      children: [
+        SimpleDialogOption(
+          onPressed: () => Navigator.pop(ctx, true),
+          child: const Text('P / A   (Present / Absent)'),
+        ),
+        SimpleDialogOption(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: const Text('1 / 0   (1 = Present, 0 = Absent)'),
+        ),
+      ],
+    ),
+  );
+}
+
 List<int>? buildAttendanceExcelBytes({
   required ExcelInfo info,
   required List<DateRecord> recs,
   required List<Map<String, String>> students,
+  bool useLetters = false, // true: P / A letters, false: 1 / 0 digits
 }) {
   final records = List<DateRecord>.from(recs)
     ..sort((a, b) => a.id.compareTo(b.id));
@@ -2109,10 +2109,25 @@ List<int>? buildAttendanceExcelBytes({
     for (final c in weekTintColors) x.style(size: 13, bg: c, wrap: true)
   ];
   final weekSerialStyles = [
-    for (final c in weekLightColors) x.style(size: 12, bg: c)
+    for (final c in weekLightColors) x.style(size: 13, bg: c)
   ];
-  final presentStyle = x.style(size: 13, font: 'FF375623', bg: 'FFC6EFCE');
-  final absentStyle = x.style(size: 13, font: 'FF9C0006', bg: 'FFFFC7CE');
+  // Total Present / Percentage cells
+  final totalPresentStyle =
+      x.style(size: 13, font: 'FF375623', bg: 'FFE2EFDA');
+  final pctGoodStyle = x.style(size: 13, font: 'FF375623', bg: 'FFC6EFCE');
+  final pctBadStyle = x.style(size: 13, font: 'FF9C0006', bg: 'FFFFC7CE');
+
+  // Attendance cells.
+  // P / A mode: soft green / soft red cell with a darker, bold letter.
+  final pLetterStyle = x.style(size: 13, font: 'FF1B5E20', bg: 'FFDFF3E3');
+  final aLetterStyle = x.style(size: 13, font: 'FFB71C1C', bg: 'FFFCE1E0');
+  // 1 / 0 mode: only the digit is coloured; the cell keeps the banded background.
+  const bandA = 'FFFFFFFF';
+  const bandB = 'FFF3F7FB';
+  final oneStyle = x.style(size: 13, font: 'FF1E8E3E', bg: bandA);
+  final oneStyleAlt = x.style(size: 13, font: 'FF1E8E3E', bg: bandB);
+  final zeroStyle = x.style(size: 13, font: 'FFD32F2F', bg: bandA);
+  final zeroStyleAlt = x.style(size: 13, font: 'FFD32F2F', bg: bandB);
 
   // ---- Columns ----
   const int firstSessionCol = 2;
@@ -2242,8 +2257,18 @@ List<int>? buildAttendanceExcelBytes({
     for (int i = 0; i < n; i++) {
       final isP = (records[i].status[roll] ?? 'P') == 'P';
       if (isP) present++;
-      x.number(firstSessionCol + i, rowIndex, isP ? 1 : 0,
-          isP ? presentStyle : absentStyle);
+      if (useLetters) {
+        x.text(firstSessionCol + i, rowIndex, isP ? 'P' : 'A',
+            isP ? pLetterStyle : aLetterStyle);
+      } else {
+        x.number(
+            firstSessionCol + i,
+            rowIndex,
+            isP ? 1 : 0,
+            isP
+                ? (alt ? oneStyleAlt : oneStyle)
+                : (alt ? zeroStyleAlt : zeroStyle));
+      }
     }
 
     final xr = rowIndex + 1;
@@ -2257,18 +2282,23 @@ List<int>? buildAttendanceExcelBytes({
       final tcRef = '${_excelColLetters(totalClassesCol)}$xr';
       final tpRef = '${_excelColLetters(presentCol)}$xr';
       final pcRef = '${_excelColLetters(pctCol)}$xr';
-      x.formula(totalClassesCol, rowIndex, 'COUNT($first:$last)', n,
+      x.formula(totalClassesCol, rowIndex,
+          useLetters ? 'COUNTA($first:$last)' : 'COUNT($first:$last)', n,
           totalCellStyle);
-      x.formula(presentCol, rowIndex, 'SUM($first:$last)', present,
-          presentStyle);
+      x.formula(
+          presentCol,
+          rowIndex,
+          useLetters ? 'COUNTIF($first:$last,"P")' : 'SUM($first:$last)',
+          present,
+          totalPresentStyle);
       x.formula(pctCol, rowIndex, 'IF($tcRef=0,0,ROUND($tpRef/$tcRef*100,2))',
-          pctRounded, pct >= 75 ? presentStyle : absentStyle);
+          pctRounded, pct >= 75 ? pctGoodStyle : pctBadStyle);
       x.formula(marksCol, rowIndex, 'ROUND($pcRef/100*$marksRef,2)',
           marksCached, marksCellStyle);
     } else {
       x.number(totalClassesCol, rowIndex, 0, totalCellStyle);
-      x.number(presentCol, rowIndex, 0, presentStyle);
-      x.number(pctCol, rowIndex, 0, absentStyle);
+      x.number(presentCol, rowIndex, 0, totalPresentStyle);
+      x.number(pctCol, rowIndex, 0, pctBadStyle);
       x.number(marksCol, rowIndex, 0, marksCellStyle);
     }
     x.rowHeights[rowIndex] = 28;
@@ -2300,10 +2330,9 @@ List<int>? buildAttendanceExcelBytes({
 
 
 // ---- Student loaders ----
-// Internal key of a student (called "roll" across the app). The first student
-// with roll "12" gets "12", the next gets "12__2", then "12__3" and so on. This
-// way students with the same roll or name never overwrite each other. Screens
-// and Excel always show rollOf(key), which is just "12".
+// Internal key of a student (called "roll" in the app). The first roll "12" gets
+// "12", then "12__2", "12__3" and so on, so duplicates never overwrite each other.
+// Screens and Excel show rollOf(key), i.e. "12".
 String rollOf(String key) {
   final i = key.indexOf('__');
   return i < 0 ? key : key.substring(0, i);
@@ -2349,10 +2378,8 @@ Future<Map<String, String>> loadSemesterLabels(
   return out;
 }
 
-// Copies all students of semester [from] into semester [to] (same department
-// and section). The source keeps its students and nothing in the destination is
-// overwritten: if a roll already exists there, a new unique key is created.
-// Returns the number of students copied.
+// Copies all students of semester [from] to [to] (same department and section).
+// Nothing is overwritten: a clashing roll gets a new unique key. Returns the count.
 Future<int> copyStudentsToSemester(SemRef from, SemRef to) async {
   final src = await loadSemesterStudents(from);
   if (src.isEmpty) return 0;
@@ -2370,9 +2397,8 @@ Future<int> copyStudentsToSemester(SemRef from, SemRef to) async {
   return src.length;
 }
 
-// Master list of a semester (managed by the admin). It reads Firestore first
-// (server or cache). If nothing is cached yet, it falls back to the SQLite copy
-// so the list is not empty just because we are offline.
+// Master list of a semester (admin-managed). Reads Firestore first and falls back
+// to the SQLite copy when nothing is cached.
 Future<List<Map<String, String>>> loadSemesterStudents(SemRef sem) async {
   final res = await _safeQuery(sem.students);
   final m = <String, String>{};
@@ -2430,8 +2456,7 @@ class DateRecord {
   DateRecord(this.id, this.status, this.meta);
 }
 
-// All attendance records of a subject in one read (sorted by id). Falls back to
-// the SQLite copy when Firestore has nothing cached.
+// All attendance records of a subject in one read (sorted by id). Falls back to SQLite.
 Future<List<DateRecord>> loadDateRecords(SemRef sem, String subject) async {
   final res = await _safeQuery(sem.dates(subject));
   List<DateRecord> out;
@@ -2474,8 +2499,7 @@ Future<void> claimSubject(
   if (confirm != true) return;
   if (!context.mounted) return;
 
-  // A transaction needs internet so the server can confirm that two teachers
-  // cannot claim the same subject.
+  // Needs internet so the server can stop two teachers claiming the same subject.
   if ((await _netState()) != _Net.reachable) {
     if (context.mounted) {
       showSnack(context, 'An internet connection is required to claim a subject.');
@@ -2602,8 +2626,7 @@ Future<void> deleteSubjectEverywhere(SemRef sem, String subject) async {
   await LocalDb.deleteSubject(sem, subject);
 }
 
-// Delete a whole department: everything in every section and semester, plus old
-// data.
+// Deletes a whole department (all sections, semesters and old data).
 Future<void> deleteDepartmentEverywhere(String deptId) async {
   unawaited(FirebaseFirestore.instance
       .collection('meta')
@@ -2642,10 +2665,8 @@ Future<void> deleteDepartmentEverywhere(String deptId) async {
   await LocalDb.deleteDepartment(deptId);
 }
 
-// Admin only: deletes every attendance record of every subject from Firestore,
-// SQLite and the on-device cache. Departments, subjects and students are not
-// touched. Needs internet so the server copy is really deleted (throws
-// otherwise).
+// Admin only: deletes all attendance records from Firestore, SQLite and the device
+// cache. Departments, subjects and students stay. Needs internet (throws otherwise).
 Future<void> deleteAllAttendanceEverywhere() async {
   final fs = FirebaseFirestore.instance;
   final snap =
@@ -2666,11 +2687,9 @@ Future<void> deleteAllAttendanceEverywhere() async {
 
 // ---------------------------------------------------------------------------
 // Backup & restore
-// Backup: every document of the app is read from Firestore and written into one
-// JSON file (kept on the phone, or downloaded on the web).
-// Restore: the JSON file is read back and every document is written to its
-// original path. Documents that are not in the file are left alone, so a
-// restore never deletes anything. Running it twice is harmless.
+// Backup: reads every Firestore document into one JSON file (saved on the phone
+// or downloaded on web). Restore: writes each document back to its path. It never
+// deletes anything, and running it twice is harmless.
 // ---------------------------------------------------------------------------
 const String kBackupFormat = 'attendance_backup_v1';
 const List<String> _kBackupRoots = ['departments', 'teachers', 'settings', 'meta'];
@@ -2909,8 +2928,7 @@ Future<void> restoreFromBackupUi(BuildContext context) async {
 
 // One-time migration of the old Software Engineering data
 //   -> Software Engineering / Section A / Semester 3
-// The old data is copied, not deleted, so this is safe. Running it again
-// changes nothing (it merges).
+// Data is copied, not deleted, so running it again is safe.
 Future<void> _copyDocs(
   List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
   DocumentReference<Map<String, dynamic>> Function(
@@ -2963,7 +2981,7 @@ Future<bool> migrateSoftwareEngineeringLegacy() async {
     await LocalDb.replaceAllFromFirestore();
     return true;
   } catch (e) {
-    debugPrint('Migration failed (agli baar phir try hoga): $e');
+    debugPrint('Migration failed (will retry next time): $e');
     return false;
   }
 }
@@ -2999,10 +3017,9 @@ Future<void> ensureHiddenAdminDepartment() async {
 }
 
 // Local SQLite database (used alongside Firestore, not instead of it)
-// Every function catches its own errors, so an SQLite problem never stops the
-// app or Firestore.
-// Passwords are NOT saved here. The department username is not saved either, so
-// an export does not reveal the second admin.
+// Every function catches its own errors, so SQLite problems never stop the app.
+// Passwords and the department username are not saved here (keeps the second
+// admin hidden in exports).
 class LocalDb {
   static sql.Database? _db;
   static bool _syncing = false;
@@ -3050,9 +3067,8 @@ class LocalDb {
       path,
       version: 2,
       onCreate: (db, version) async => _createAll(db),
-      // v1 -> v2: the structure changed (sections and semesters). The local DB
-      // is only a copy of Firestore, so we drop the old tables and create new
-      // ones. The data fills back in from Firestore when the internet returns.
+      // v1 -> v2: the structure changed. The local DB is only a Firestore copy, so drop
+      // the old tables and recreate them; data refills when online.
       onUpgrade: (db, oldV, newV) async {
         for (final t in _tables) {
           await db.execute('DROP TABLE IF EXISTS $t');
@@ -3310,9 +3326,8 @@ class LocalDb {
     });
   }
 
-  // Reads all Firestore data and rebuilds SQLite to match it. collectionGroup
-  // fetches each collection in one query, and the document path tells which
-  // department / section / semester it belongs to.
+  // Rebuilds SQLite from Firestore. collectionGroup fetches each collection in one
+  // query; the document path gives the department / section / semester.
   static Future<bool> replaceAllFromFirestore() async {
     if (_syncing) return false;
     if (!await _isOnline()) return false;
@@ -3330,8 +3345,8 @@ class LocalDb {
       final teachers = await fs.collection('teachers').get().timeout(t);
       final claims = await fs.collectionGroup('claims').get().timeout(t);
 
-      // If any data came from the offline cache, we are not really online. Keep
-      // the existing SQLite data instead of replacing it with a partial copy.
+      // Data from the offline cache means we aren't really online: keep the existing
+      // SQLite data instead of replacing it with a partial copy.
       final allSnaps = [
         depts,
         semDocs,
@@ -3617,9 +3632,8 @@ class LocalDb {
     }
   }
 
-  // Quick refresh of one subject's attendance from the server (used by the
-  // monthly view so SQLite also shows records marked on other devices). Returns
-  // true only if fresh server data was written.
+  // Quick refresh of one subject's attendance from the server (monthly view), so
+  // records from other devices show too. Returns true only if fresh data was written.
   static Future<bool> refreshSubjectAttendance(SemRef s, String subject) async {
     try {
       if ((await _netState()) != _Net.reachable) return false;
@@ -3669,8 +3683,7 @@ class LocalDb {
   }
 }
 
-// Refreshes the SQLite copy from Firestore at most every few hours, and right
-// after the phone comes back online. Safe to call any time.
+// Refreshes SQLite from Firestore every few hours and right after coming back online.
 Future<void> syncLocalDbIfStale({bool force = false}) async {
   try {
     final prefs = await SharedPreferences.getInstance();
@@ -3685,8 +3698,8 @@ Future<void> syncLocalDbIfStale({bool force = false}) async {
   } catch (_) {}
 }
 
-// Login-time prefetch: students, subjects, semesters and attendance are cached
-// with one query each, so the lists and attendance also show up offline.
+// Login-time prefetch: one query each for students, subjects, semesters and
+// attendance, so lists and attendance also show offline.
 Future<void> prefetchAllData() async {
   try {
     if ((await _netState()) != _Net.reachable) return;
@@ -3709,8 +3722,8 @@ Future<void> prefetchAllData() async {
 
 // Departments screen (first screen after login, for admin and teacher)
 class DepartmentsScreen extends StatefulWidget {
-  // claimMode is the teacher's "Claim Subject" entry point: Department ->
-  // Section -> Semester -> Subject (tap to claim).
+  // claimMode: the teacher's "Claim Subject" flow (Department -> Section ->
+  // Semester -> Subject; tap to claim).
   final bool claimMode;
   const DepartmentsScreen({super.key, this.claimMode = false});
 
@@ -3767,15 +3780,15 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
     super.dispose();
   }
 
-  // On admin login, run these in order: seed -> second admin -> copy old
-  // Software Engineering data into Section A / Semester 3 -> local sync.
+  // On admin login, run in order: seed -> second admin -> copy old Software
+  // Engineering data to Section A / Semester 3 -> local sync.
   Future<void> _adminBootstrap() async {
     await _ensureSeedData();
     await ensureHiddenAdminDepartment();
     final moved = await migrateSoftwareEngineeringLegacy();
     if (moved && mounted) {
       showSnack(context,
-          'Software Engineering ka purana data Section A → Semester 3 mein daal diya gaya.');
+          'Old Software Engineering data has been moved into Section A / Semester 3.');
     }
     await syncLocalDbIfStale();
   }
@@ -3819,8 +3832,7 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
         }
       }
 
-      // The old Software Engineering students and subjects are now seeded
-      // directly into Section A / Semester 3.
+      // Old Software Engineering data is now seeded directly into Section A / Semester 3.
       final target = SemRef(kSoftwareEngineeringDeptId, 'A', '3');
       final studentsSnap = await target.students.limit(1).get().timeout(_kNetworkTimeout);
       if (studentsSnap.docs.isEmpty) {
@@ -3851,8 +3863,7 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
     if (mounted) setState(() => _seeded = true);
   }
 
-  // Departments no longer have their own passwords, so we ask the user to type
-  // the department name to confirm the delete.
+  // Departments have no passwords now, so the user types the name to confirm delete.
   void _confirmDeleteDepartment(String deptId, String deptName) {
     final controller = TextEditingController();
     String? errorText;
@@ -4558,9 +4569,8 @@ class SemestersScreen extends StatelessWidget {
   }
 }
 
-// Subjects screen (subjects of one department, section and semester)
-// Admin: add / delete / open. Teacher: claim / unclaim / open (own subjects
-// only).
+// Subjects screen (one department, section and semester)
+// Admin: add / delete / open. Teacher: claim / unclaim / open (own subjects only).
 class SubjectsScreen extends StatelessWidget {
   final String deptName;
   final SemRef sem;
@@ -4833,9 +4843,8 @@ class _TeacherHomeScreenState extends State<TeacherHomeScreen> {
   Future<void> _open(BuildContext context, SemRef sem, String subject) async {
     final snap = await safeGetDocOrNull(sem.subjectDoc(subject));
     final cb = (snap?.data()?['claimed_by'] ?? '').toString();
-    // Remove the entry only if the server confirms the subject is gone or
-    // reassigned. When offline (or unreadable), just open it and never remove a
-    // claim.
+    // Remove the entry only if the server confirms the subject is gone or reassigned.
+    // Offline or unreadable: just open it and never remove a claim.
     final lost = snap != null &&
         !snap.metadata.isFromCache &&
         (!snap.exists || cb != AppSession.teacherId);
@@ -4995,9 +5004,8 @@ class _TeacherHomeScreenState extends State<TeacherHomeScreen> {
 }
 
 // Import students (Excel .xlsx / CSV / TXT)
-// The file only needs names. Roll numbers are made in file order: the first
-// name gets 1, the second 2, and so on. Both the admin (semester master list)
-// and the teacher (subject list) use these helpers.
+// Only names are needed. Rolls follow file order: first name 1, second 2, and so on.
+// Used by both the admin (semester list) and the teacher (subject list).
 final RegExp _importLetterRe = RegExp(r'\p{L}', unicode: true);
 
 void _importSnack(BuildContext context, String msg) {
@@ -5058,8 +5066,8 @@ List<List<String>> _parseCsvText(String text) {
   return rows;
 }
 
-// The cell value type is different in different versions of the excel package,
-// so we read it as dynamic and convert it to text.
+// The cell value type differs between excel package versions, so read it as
+// dynamic and convert it to text.
 String _excelCellText(dynamic data) {
   try {
     final v = data?.value;
@@ -5081,8 +5089,8 @@ final RegExp _importSkipRowRe = RegExp(
     r'^(total|grand total|average|signature|remarks?|present|absent)$',
     caseSensitive: false);
 
-// Cleans one name cell: hidden/odd spaces, serial prefixes like "1." "01)" or
-// "12 Rahul", and stray punctuation at the ends.
+// Cleans a name cell: odd spaces, serial prefixes ("1.", "01)", "12 Rahul") and
+// punctuation at the ends.
 String _cleanImportedName(String raw) {
   var s = raw.replaceAll(RegExp(r'[\u200B-\u200D\uFEFF\u00A0]'), ' ');
   s = s.replaceAll(RegExp(r'\s+'), ' ').trim();
@@ -5134,9 +5142,8 @@ List<String> _namesFromRows(List<List<String>> rows) {
     out.add(name);
   }
 
-  // 1) Look for a header row in the first 15 rows (title rows above it are
-  //    ignored). Supports "Name", "Student Name", "Name of Student", Hindi
-  //    "naam", and separate "First Name" + "Last Name" columns.
+  // 1) Find a header row in the first 15 rows (rows above it are ignored). Supports
+  // "Name", "Student Name", "Name of Student", "naam", or separate First / Last Name.
   var headerRow = -1;
   var nameCol = -1, firstCol = -1, lastCol = -1;
   final scan = data.length < 15 ? data.length : 15;
@@ -5172,9 +5179,8 @@ List<String> _namesFromRows(List<List<String>> rows) {
     return out;
   }
 
-  // 2) No name header: skip a roll/serial header row if there is one, then
-  //    pick the column that looks most like names (letters, no digits,
-  //    preferably several words). Roll codes like "21CS001" are not names.
+  // 2) No name header: skip any roll/serial header row, then pick the column that
+  // looks most like names (letters, no digits, several words). Codes like "21CS001" aren't names.
   const headerWords = {
     'roll', 'roll no', 'roll no.', 'roll number', 'rollno', 'sr', 'sr.',
     'sr no', 'sr no.', 'sr#', 's.no', 's no', 'sno', 'serial', 'serial no',
@@ -5274,9 +5280,8 @@ Future<List<String>?> pickStudentNamesFromFile(BuildContext context) async {
   return names;
 }
 
-// Confirm dialog. Asks for the first roll number (default 1) and returns it,
-// or null if cancelled. It shows the resulting roll range live and warns if
-// some of those roll numbers are already used (existingRolls).
+// Confirm dialog: asks for the first roll number (default 1), null if cancelled.
+// Shows the resulting roll range live and warns if any rolls are already used.
 Future<int?> confirmStudentImport(
   BuildContext context,
   List<String> names,
@@ -5418,9 +5423,8 @@ class ManageStudentsScreen extends StatelessWidget {
               final name = nameController.text.trim();
               if (roll.isEmpty || name.isEmpty) return;
 
-              // Edit: the same student (existingRoll is its key). Add: if the
-              // roll already exists, a new unique key is created and the old
-              // student is not overwritten.
+              // Edit: same student (existingRoll is its key). Add: if the roll exists, a new
+              // unique key is created so the old student isn't overwritten.
               String key = existingRoll ?? roll;
               if (!isEditing) {
                 final existing = await loadSemesterStudents(sem);
@@ -5514,8 +5518,7 @@ class ManageStudentsScreen extends StatelessWidget {
     var batch = FirebaseFirestore.instance.batch();
     var ops = 0;
     for (var i = 0; i < names.length; i++) {
-      // If the roll already exists, a new unique key is created and nothing is
-      // overwritten.
+      // If the roll exists, a new unique key is created; nothing is overwritten.
       final key = uniqueStudentKey((start + i).toString(), taken);
       taken.add(key);
       batch.set(sem.students.doc(key), {'roll': key, 'name': names[i]});
@@ -5660,8 +5663,7 @@ class RollBadge extends StatelessWidget {
 }
 
 // Subject students (add / "remove" for this subject only)
-// Remove is a soft remove: the student is not deleted from the admin's master
-// list, just hidden from this subject's list.
+// Soft remove: the student stays in the admin's master list and is only hidden here.
 class SubjectStudentsScreen extends StatefulWidget {
   final SemRef sem;
   final String subjectName;
@@ -5741,8 +5743,7 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
               final typedRoll = rollController.text.trim();
               final name = nameController.text.trim();
               if (typedRoll.isEmpty || name.isEmpty) return;
-              // If the same roll already exists (master / extra / hidden),
-              // create a unique key.
+              // If the roll already exists (master / extra / hidden), create a unique key.
               final roll = uniqueStudentKey(
                   typedRoll, [..._master.keys, ..._overrides.keys]);
               final sem = widget.sem;
@@ -5908,8 +5909,8 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
 }
 
 // Time picker (6:00 AM to 6:00 PM only)
-// Flutter's default picker cannot limit the range, so this is a small custom
-// dialog: hours from 6 AM to 6 PM, and only :00 at 6 PM.
+// Flutter's picker can't limit the range, so this is a small custom dialog:
+// 6 AM to 6 PM, with only :00 at 6 PM.
 Future<TimeOfDay?> pickClassTime(BuildContext context, TimeOfDay? initial) {
   int hour = (initial?.hour ?? 9).clamp(kPickerStartHour, kPickerEndHour).toInt();
   int minute = initial?.minute ?? 0;
@@ -5980,9 +5981,8 @@ Future<TimeOfDay?> pickClassTime(BuildContext context, TimeOfDay? initial) {
 }
 
 // Import old attendance (Excel .xlsx / CSV) into a subject's attendance
-// Expected layout: a row of dates on top, student names on the left, and P / A
-// under each date. Each date becomes one session record. Excel files exported
-// by this app can be imported directly.
+// Layout: dates in a row on top, names on the left, P / A under each date.
+// Each date becomes one session record. Files exported by this app import directly.
 class ImportColumn {
   final int col;
   final DateTime date;
@@ -6025,8 +6025,7 @@ DateTime? _importMakeDate(int y, int m, int d) {
   return dt;
 }
 
-// true: 12/09/2025 means 12 Sep (day first). false: it means Dec 9.
-// parseAttendanceSheet sets this by looking at the whole sheet.
+// true: 12/09/2025 means 12 Sep (day first); false: Dec 9. Set by parseAttendanceSheet.
 bool _importDayFirst = true;
 
 bool _inferDayFirst(List<List<String>> g) {
@@ -6048,8 +6047,7 @@ bool _inferDayFirst(List<List<String>> g) {
   return mf <= df;
 }
 
-// Reads a date from cell text. Numeric formats are treated as day first
-// (dd/mm/yyyy).
+// Reads a date from cell text. Numeric formats are day first (dd/mm/yyyy).
 DateTime? _parseImportDate(String raw) {
   var s = raw.trim();
   if (s.isEmpty) return null;
@@ -6180,8 +6178,7 @@ String _importCellText(dynamic data) {
 }
 
 // Fallback XLSX reader. The 'excel' package often crashes on files from WPS,
-// Google Sheets and mobile apps ("not found" / null error). This reads the XML
-// inside the zip directly, so every kind of .xlsx opens.
+// Google Sheets and mobile apps. This reads the zip's XML directly so any .xlsx opens.
 String _xmlUnescape(String s) => s
     .replaceAll('&lt;', '<')
     .replaceAll('&gt;', '>')
@@ -6379,12 +6376,11 @@ List<List<List<String>>> _allXlsxGrids(Uint8List bytes,
 }
 
 // parseAttendanceSheet (works with any layout)
-// Detects three layouts by itself and uses the one with the most P/A entries:
-//   1) WIDE       : dates in one row, student names in one column (P/A below)
-//   2) TRANSPOSED : dates in one column, student names in the top row
-//   3) LONG       : each row = Date | Name | Status (any column order)
-// Column order, extra columns and status wording (P / Present / 1 / ...) do not
-// matter. ImportColumn.col is just a unique id, so it works for every layout.
+// Detects the layout itself and uses the one with the most P/A entries:
+//   1) WIDE: dates in one row, names in one column
+//   2) TRANSPOSED: dates in one column, names in the top row
+//   3) LONG: each row = Date | Name | Status (any column order)
+// Column order, extra columns and status wording don't matter.
 class _ImportHeader {
   final int row;
   final Map<int, DateTime> dates;
@@ -6472,8 +6468,7 @@ _ImportHeader? _importHeaderFromRow(List<List<String>> g, int r) {
   return dates.isEmpty ? null : _ImportHeader(r, dates);
 }
 
-// Gets [year, month] from the title or header (e.g. "September 2025",
-// "09/2025").
+// Gets [year, month] from the title or header (e.g. "September 2025", "09/2025").
 List<int>? _importFindMonthYear(List<List<String>> g, int upToRow) {
   final monthRe = RegExp(
       r"\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)\b(?:[\s,.\-/']*(20\d{2}))?",
@@ -6518,8 +6513,7 @@ List<int>? _importFindMonthYear(List<List<String>> g, int upToRow) {
   return null;
 }
 
-// A header row with only day numbers (1 2 3 ... 31), with the month and year
-// above it.
+// A header row with only day numbers (1 2 3 ... 31), with month and year above it.
 _ImportHeader? _importDayNumberHeader(List<List<String>> g, int limit) {
   final dayRe = RegExp(r'^(\d{1,2})$');
   for (var r = 0; r < limit; r++) {
@@ -6589,8 +6583,7 @@ _ImportDraft? _importParseWide(List<List<String>> g) {
   final dateKeys = dates.keys.toList()..sort();
   final firstDateCol = dateKeys.first;
 
-  // Name column: the one with 'name' in its header, otherwise the one with the
-  // most text (not status).
+  // Name column: the one with 'name' in its header, else the one with the most text.
   var nameCol = -1;
   var bestScore = 0.0;
   for (var c = 0; c < nC; c++) {
@@ -6652,8 +6645,8 @@ _ImportDraft? _importParseWide(List<List<String>> g) {
   }
   if (nameRows.isEmpty) return null;
 
-  // Merged date header (several session columns under one date): the blank
-  // header cells that follow, if they have P/A, belong to the same date.
+  // Merged date header (several sessions under one date): the blank header cells
+  // after it that have P/A belong to the same date.
   final colDate = Map<int, DateTime>.from(dates);
   for (final c in dateKeys) {
     for (var k = c + 1; k < nC; k++) {
@@ -6668,8 +6661,7 @@ _ImportDraft? _importParseWide(List<List<String>> g) {
     }
   }
 
-  // Session numbers: use "Session 2" if the header has it, otherwise count 1,
-  // 2, 3 when the same date repeats.
+  // Session numbers: use "Session 2" from the header, else count 1, 2, 3 for repeated dates.
   final allCols = colDate.keys.toList()..sort();
   final used = <String>{};
   final counter = <String, int>{};
@@ -6864,9 +6856,8 @@ String _sortedImportName(String s) {
   return t.join(' ');
 }
 
-// Match file names to the app's students. Only sure matches count (full name,
-// the same words in a different order, or the roll number). Everything else is
-// shown to the user.
+// Matches file names to app students. Only sure matches count (full name, same words
+// in another order, or roll number); the rest are shown to the user.
 Map<int, String> autoMatchImportRows(
     List<ImportRow> rows, List<Map<String, String>> students) {
   final result = <int, String>{};
@@ -6969,8 +6960,8 @@ Future<ImportSheet?> pickAttendanceSheetFromFile(BuildContext context) async {
   return sheet;
 }
 
-// Review screen: shows what will be imported and which names did not match. The
-// user can link an unmatched name to a student, or skip it.
+// Review screen: shows what will be imported and the unmatched names. The user can
+// link a name to a student or skip it.
 class ImportReviewScreen extends StatefulWidget {
   final ImportSheet sheet;
   final List<Map<String, String>> students;
@@ -7184,11 +7175,10 @@ class _ImportReviewScreenState extends State<ImportReviewScreen> {
 }
 
 // Subject attendance screen
-// Admin: no restrictions. Teacher: with the master switch OFF, only today's
-// date, only in the first 20 minutes of each hour, and only a new record,
-// unless the admin allows each ability in Detailed permissions (any time,
-// change time, change date, edit, delete). With the master switch ON,
-// everything is open. Each subject has its own screen.
+// Admin: no limits. Teacher (master switch OFF): only today, only in the first 20
+// minutes of each hour, and only new records, unless allowed in Detailed permissions
+// (any time, change time, change date, edit, delete). Master switch ON: all open.
+// Each subject has its own screen.
 class SubjectAttendanceScreen extends StatefulWidget {
   final SemRef sem;
   final String semLabel;
@@ -7221,8 +7211,8 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
   String? timeStr; // 'HH:mm'
   Map<String, String> existingMeta = {};
 
-  // All records of this subject, loaded once (one read), then used for the
-  // selected date, copying the previous session, and the percentages.
+  // All records of this subject, loaded once and reused for the selected date,
+  // copying the previous session and the percentages.
   List<DateRecord> _records = [];
 
   TeacherPerms perms = TeacherPerms.none;
@@ -7409,17 +7399,15 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       for (final s in students) s['roll']!: attendanceStatus[s['roll']!] ?? 'P',
     };
 
-    // Time: an admin (or a teacher allowed to change the time, or when the
-    // master switch is ON) can pick their own time. Otherwise a new record
-    // gets the current time and an edited record keeps its old time.
+    // Time: an admin (or a teacher allowed to change time, or master switch ON) picks it.
+    // Otherwise a new record gets the current time and an edited one keeps its old time.
     String? time = _canChangeTime
         ? timeStr
         : (existingRecord ? timeStr : hhmm(TimeOfDay.now()));
     if (time == null && !existingRecord) time = hhmm(TimeOfDay.now());
     if (time != null) data['_time'] = time;
 
-    // Who marked it: if an admin edits a teacher's record, the original
-    // teacher's name stays.
+    // Who marked it: if an admin edits a teacher's record, the teacher's name stays.
     String byId = AppSession.userId;
     String byName = AppSession.userName;
     if (_isAdmin && (existingMeta['_marked_by'] ?? '').isNotEmpty) {
@@ -7494,9 +7482,8 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
   }
 
   // ---- Import old attendance from Excel / CSV ----
-  // For both admin and teacher. This is old-date data, so the time window and
-  // "today only" rules do not apply. But an existing session record can be
-  // changed only by the admin (or when the master switch is ON).
+  // For admin and teacher. This is old-date data, so the time window and "today only"
+  // rules don't apply. Changing an existing session needs admin (or master switch ON).
   Future<void> _importFromFile() async {
     if (students.isEmpty) {
       showSnack(context, 'Add students to this subject first.', color: kAbsent);
@@ -7595,11 +7582,14 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
   }
 
   void _exportToExcel() async {
+    final letters = await askExportFormat(context);
+    if (letters == null || !mounted) return;
     final recs = await loadDateRecords(widget.sem, widget.subjectName);
     final fileBytes = buildAttendanceExcelBytes(
       info: await loadExcelInfo(widget.sem, widget.subjectName),
       recs: recs,
       students: students,
+      useLetters: letters,
     );
     if (kIsWeb) {
       final safeName =
@@ -8015,8 +8005,8 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
 }
 
 // Manage attendance screen (edit / delete old records)
-// Admin, or a teacher who was given the Edit and/or Delete permission (or when
-// the master switch is ON). The Edit and Delete buttons follow those permissions.
+// Admin, or a teacher with Edit and/or Delete permission (or master switch ON).
+// The Edit and Delete buttons follow those permissions.
 class ManageAttendanceScreen extends StatelessWidget {
   final SemRef sem;
   final String semLabel;
@@ -8170,9 +8160,8 @@ class ManageAttendanceScreen extends StatelessWidget {
   }
 }
 
-// Student status card (shared by Subject Stats and Monthly Attendance, for
-// admin and teacher). Compact and centered. All text sits in a Column /
-// Expanded cell so nothing can overflow the card.
+// Student status card (shared by Subject Stats and Monthly Attendance).
+// Compact and centered; text sits in a Column / Expanded so nothing overflows.
 class StatEntry {
   final String label;
   final bool present;
@@ -8443,9 +8432,8 @@ class _SubjectStatsScreenState extends State<SubjectStatsScreen> {
   }
 }
 
-// Monthly attendance (admin and teacher): pick a month and see only that
-// month's attendance of this subject. It is read from the local SQLite database
-// (works offline) and refreshed first when online.
+// Monthly attendance (admin and teacher): pick a month to see only that month's
+// records. Read from local SQLite (works offline), refreshed first when online.
 class MonthlyAttendanceScreen extends StatefulWidget {
   final SemRef sem;
   final String semLabel;
@@ -8570,12 +8558,13 @@ class _MonthlyAttendanceScreenState extends State<MonthlyAttendanceScreen> {
     if (picked != null) await _setMonth(picked);
   }
 
-  // ---- Excel export of the selected month (admin and teacher, every subject)
-  // ----
+  // ---- Excel export of the selected month (admin and teacher, every subject) ----
   bool _exporting = false;
 
   Future<void> _exportExcel() async {
     if (_exporting || _records.isEmpty || _students.isEmpty) return;
+    final letters = await askExportFormat(context);
+    if (letters == null || !mounted) return;
     setState(() => _exporting = true);
     try {
       final recs = List<DateRecord>.from(_records)
@@ -8585,6 +8574,7 @@ class _MonthlyAttendanceScreenState extends State<MonthlyAttendanceScreen> {
         info: await loadExcelInfo(widget.sem, widget.subjectName),
         recs: recs,
         students: _students,
+        useLetters: letters,
       );
       if (bytes == null) throw Exception('Excel file could not be created');
 
