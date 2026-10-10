@@ -1844,7 +1844,7 @@ String _ordinal(int n) {
 // written directly as xlsx XML. Styles, merges, widths and heights are exact.
 class _XlsxBuilder {
   final List<String> _fonts = [
-    '<font><sz val="11"/><name val="Calibri"/><family val="2"/></font>'
+    '<font><sz val="11"/><name val="Arial"/><family val="2"/></font>'
   ];
   final List<String> _fills = [
     '<fill><patternFill patternType="none"/></fill>',
@@ -1885,7 +1885,7 @@ class _XlsxBuilder {
     final fontId = _idx(
         _fonts,
         '<font>${bold ? '<b/>' : ''}<sz val="$size"/>'
-        '<color rgb="$font"/><name val="Calibri"/><family val="2"/></font>');
+        '<color rgb="$font"/><name val="Arial"/><family val="2"/></font>');
     final fillId = bg == null
         ? 0
         : _idx(
@@ -1893,7 +1893,7 @@ class _XlsxBuilder {
             '<fill><patternFill patternType="solid"><fgColor rgb="$bg"/>'
             '<bgColor indexed="64"/></patternFill></fill>');
     final bStyle = border ? (thick ? 'medium' : 'thin') : null;
-    final bColor = thick ? 'FF1F3864' : 'FF8EA9C1';
+    final bColor = thick ? 'FF1F3864' : 'FFB4C0D8';
     final borderId = _idx(
         _borders,
         '<border>${_side('left', bStyle, bColor)}${_side('right', bStyle, bColor)}'
@@ -1952,7 +1952,9 @@ class _XlsxBuilder {
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
         '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>'
-        '<sheetViews><sheetView workbookViewId="0" tabSelected="1"/></sheetViews>'
+        '<sheetViews><sheetView showGridLines="0" workbookViewId="0" tabSelected="1">'
+        '<pane xSplit="2" ySplit="7" topLeftCell="C8" activePane="bottomRight" state="frozen"/>'
+        '</sheetView></sheetViews>'
         '<sheetFormatPr defaultRowHeight="22" customHeight="1"/>');
     if (colWidths.isNotEmpty) {
       sb.write('<cols>');
@@ -1982,9 +1984,12 @@ class _XlsxBuilder {
       sb.write('<mergeCells count="${merges.length}">'
           '${merges.map((m) => '<mergeCell ref="$m"/>').join()}</mergeCells>');
     }
-    sb.write('<pageMargins left="0.4" right="0.4" top="0.5" bottom="0.5" '
+    // Print: A4 landscape, whole sheet fitted on ONE page, centered.
+    sb.write('<printOptions horizontalCentered="1"/>'
+        '<pageMargins left="0.3" right="0.3" top="0.4" bottom="0.5" '
         'header="0.3" footer="0.3"/>'
-        '<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0"/>'
+        '<pageSetup paperSize="9" orientation="landscape" fitToWidth="1" fitToHeight="1"/>'
+        '<headerFooter><oddFooter>&amp;CPage &amp;P of &amp;N</oddFooter></headerFooter>'
         '</worksheet>');
 
     final styles = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -2067,67 +2072,58 @@ List<int>? buildAttendanceExcelBytes({
     ..sort((a, b) => a.id.compareTo(b.id));
   final x = _XlsxBuilder();
 
-  // ---- Colour theme ----
+  // ---- Colour theme (Navy Gold) ----
   const navy = 'FF1F3864';
-  const blue = 'FF2F5597';
-  final titleStyle = x.style(size: 40, font: 'FFFFFFFF', bg: navy, thick: true);
-  final fillerStyle = x.style(bg: 'FFEAF0F8', thick: true);
+  const head = 'FF2F4F8F';
+  const gold = 'FFC9A227';
+  const infoBg = 'FFEAF0FA';
+  const bandA = 'FFFFFFFF';
+  const bandB = 'FFF3F6FB';
+  const green = 'FF1B7F3B';
+  const red = 'FFD92D20';
+  final titleStyle = x.style(size: 28, font: 'FFFFFFFF', bg: navy, thick: true);
+  final fillerStyle = x.style(border: false);
   final infoLabelStyle =
-      x.style(size: 16, font: 'FFFFFFFF', bg: blue, thick: true);
-  final infoValueStyle = x.style(size: 17, bg: 'FFFFF2CC', thick: true);
+      x.style(size: 12, font: 'FFFFFFFF', bg: navy, thick: true);
+  final infoValueStyle = x.style(size: 12, font: navy, bg: infoBg, thick: true);
   final idHeadStyle =
-      x.style(size: 16, font: 'FFFFFFFF', bg: navy, wrap: true, thick: true);
+      x.style(size: 12, font: 'FFFFFFFF', bg: head, wrap: true, thick: true);
   final totalHeadStyle =
-      x.style(size: 13, font: 'FFFFFFFF', bg: 'FF44546A', wrap: true, thick: true);
-  final presentHeadStyle =
-      x.style(size: 13, font: 'FFFFFFFF', bg: 'FF548235', wrap: true, thick: true);
-  final pctHeadStyle =
-      x.style(size: 13, font: 'FFFFFFFF', bg: 'FFC55A11', wrap: true, thick: true);
-  final marksHeadStyle =
-      x.style(size: 13, font: 'FFFFFFFF', bg: 'FFBF9000', wrap: true, thick: true);
-  final marksCellStyle = x.style(size: 13, bg: 'FFFFF2CC');
-  final totalCellStyle = x.style(size: 13, bg: 'FFE7EAF0');
-  final cellStyle = x.style(size: 13, bg: 'FFFFFFFF');
-  final cellStyleAlt = x.style(size: 13, bg: 'FFF2F2F2');
-  final nameStyle = x.style(size: 13, left: true, bg: 'FFFFFFFF');
-  final nameStyleAlt = x.style(size: 13, left: true, bg: 'FFF2F2F2');
+      x.style(size: 11, font: navy, bg: gold, wrap: true, thick: true);
+  final presentHeadStyle = totalHeadStyle;
+  final pctHeadStyle = totalHeadStyle;
+  final marksHeadStyle = totalHeadStyle;
 
-  const weekHeadColors = [
-    'FF2E75B6', 'FF548235', 'FFC55A11', 'FF7030A0', 'FF00808A', 'FFBF9000'
-  ];
-  const weekTintColors = [
-    'FFBDD7EE', 'FFC6E0B4', 'FFF8CBAD', 'FFD9C3E8', 'FFB2DFDB', 'FFFFE699'
-  ];
-  const weekLightColors = [
-    'FFDDEBF7', 'FFE2EFDA', 'FFFCE4D6', 'FFEDE2F4', 'FFDDF1EF', 'FFFFF2CC'
-  ];
+  // Normal cells (two alternating row backgrounds).
+  final cellStyle = x.style(size: 11, bg: bandA);
+  final cellStyleAlt = x.style(size: 11, bg: bandB);
+  final nameStyle = x.style(size: 11, left: true, bg: bandA);
+  final nameStyleAlt = x.style(size: 11, left: true, bg: bandB);
+  final totalCellStyle = cellStyle;
+  final totalCellStyleAlt = cellStyleAlt;
+  final totalPresentStyle = cellStyle;
+  final totalPresentStyleAlt = cellStyleAlt;
+  final marksCellStyle = cellStyle;
+  final marksCellStyleAlt = cellStyleAlt;
+
+  // Present (P / 1) = green text, Absent (A / 0) = red text. Text colour
+  // only, no coloured cell background. Colours are written straight into
+  // each cell (no conditional formatting), so WPS / mobile viewers show them.
+  final goodStyle = x.style(size: 11, font: green, bg: bandA);
+  final goodStyleAlt = x.style(size: 11, font: green, bg: bandB);
+  final badStyle = x.style(size: 11, font: red, bg: bandA);
+  final badStyleAlt = x.style(size: 11, font: red, bg: bandB);
+
+  // Header styles for weeks / dates / class numbers.
   final weekHeadStyles = [
-    for (final c in weekHeadColors)
-      x.style(size: 24, font: 'FFFFFFFF', bg: c, thick: true)
+    x.style(size: 14, font: 'FFFFFFFF', bg: head, thick: true)
   ];
   final weekDateStyles = [
-    for (final c in weekTintColors) x.style(size: 13, bg: c, wrap: true)
+    x.style(size: 10, font: navy, bg: 'FFD9E2F3', wrap: true)
   ];
   final weekSerialStyles = [
-    for (final c in weekLightColors) x.style(size: 13, bg: c)
+    x.style(size: 9, font: navy, bg: 'FFE9EFF9', bold: false)
   ];
-  // Total Present / Percentage cells
-  final totalPresentStyle =
-      x.style(size: 13, font: 'FF375623', bg: 'FFE2EFDA');
-  final pctGoodStyle = x.style(size: 13, font: 'FF375623', bg: 'FFC6EFCE');
-  final pctBadStyle = x.style(size: 13, font: 'FF9C0006', bg: 'FFFFC7CE');
-
-  // Attendance cells.
-  // P / A mode: soft green / soft red cell with a darker, bold letter.
-  final pLetterStyle = x.style(size: 13, font: 'FF1B5E20', bg: 'FFDFF3E3');
-  final aLetterStyle = x.style(size: 13, font: 'FFB71C1C', bg: 'FFFCE1E0');
-  // 1 / 0 mode: only the digit is coloured; the cell keeps the banded background.
-  const bandA = 'FFFFFFFF';
-  const bandB = 'FFF3F7FB';
-  final oneStyle = x.style(size: 13, font: 'FF1E8E3E', bg: bandA);
-  final oneStyleAlt = x.style(size: 13, font: 'FF1E8E3E', bg: bandB);
-  final zeroStyle = x.style(size: 13, font: 'FFD32F2F', bg: bandA);
-  final zeroStyleAlt = x.style(size: 13, font: 'FFD32F2F', bg: bandB);
 
   // ---- Columns ----
   const int firstSessionCol = 2;
@@ -2257,17 +2253,13 @@ List<int>? buildAttendanceExcelBytes({
     for (int i = 0; i < n; i++) {
       final isP = (records[i].status[roll] ?? 'P') == 'P';
       if (isP) present++;
+      final cs = isP
+          ? (alt ? goodStyleAlt : goodStyle)
+          : (alt ? badStyleAlt : badStyle);
       if (useLetters) {
-        x.text(firstSessionCol + i, rowIndex, isP ? 'P' : 'A',
-            isP ? pLetterStyle : aLetterStyle);
+        x.text(firstSessionCol + i, rowIndex, isP ? 'P' : 'A', cs);
       } else {
-        x.number(
-            firstSessionCol + i,
-            rowIndex,
-            isP ? 1 : 0,
-            isP
-                ? (alt ? oneStyleAlt : oneStyle)
-                : (alt ? zeroStyleAlt : zeroStyle));
+        x.number(firstSessionCol + i, rowIndex, isP ? 1 : 0, cs);
       }
     }
 
@@ -2284,46 +2276,51 @@ List<int>? buildAttendanceExcelBytes({
       final pcRef = '${_excelColLetters(pctCol)}$xr';
       x.formula(totalClassesCol, rowIndex,
           useLetters ? 'COUNTA($first:$last)' : 'COUNT($first:$last)', n,
-          totalCellStyle);
+          alt ? totalCellStyleAlt : totalCellStyle);
       x.formula(
           presentCol,
           rowIndex,
           useLetters ? 'COUNTIF($first:$last,"P")' : 'SUM($first:$last)',
           present,
-          totalPresentStyle);
+          alt ? totalPresentStyleAlt : totalPresentStyle);
       x.formula(pctCol, rowIndex, 'IF($tcRef=0,0,ROUND($tpRef/$tcRef*100,2))',
-          pctRounded, pct >= 75 ? pctGoodStyle : pctBadStyle);
+          pctRounded,
+          pct >= 75
+              ? (alt ? goodStyleAlt : goodStyle)
+              : (alt ? badStyleAlt : badStyle));
       x.formula(marksCol, rowIndex, 'ROUND($pcRef/100*$marksRef,2)',
-          marksCached, marksCellStyle);
+          marksCached, alt ? marksCellStyleAlt : marksCellStyle);
     } else {
-      x.number(totalClassesCol, rowIndex, 0, totalCellStyle);
-      x.number(presentCol, rowIndex, 0, totalPresentStyle);
-      x.number(pctCol, rowIndex, 0, pctBadStyle);
-      x.number(marksCol, rowIndex, 0, marksCellStyle);
+      x.number(totalClassesCol, rowIndex, 0,
+          alt ? totalCellStyleAlt : totalCellStyle);
+      x.number(presentCol, rowIndex, 0,
+          alt ? totalPresentStyleAlt : totalPresentStyle);
+      x.number(pctCol, rowIndex, 0, alt ? badStyleAlt : badStyle);
+      x.number(marksCol, rowIndex, 0, alt ? marksCellStyleAlt : marksCellStyle);
     }
-    x.rowHeights[rowIndex] = 28;
+    x.rowHeights[rowIndex] = 20;
     rowIndex++;
   }
 
   // ---- Column widths: every session column the same size ----
-  x.colWidths[0] = 11;
-  x.colWidths[1] = (maxName * 1.3 + 6).clamp(26, 50).toDouble();
+  x.colWidths[0] = 8;
+  x.colWidths[1] = (maxName * 1.1 + 4).clamp(22, 40).toDouble();
   for (int c = 2; c <= lastCol; c++) {
-    x.colWidths[c] = 13; // all date / info columns equal
+    x.colWidths[c] = 9; // all date / info columns equal
   }
-  x.colWidths[totalClassesCol] = 15;
-  x.colWidths[presentCol] = 15;
-  x.colWidths[pctCol] = 19;
-  x.colWidths[marksCol] = 15;
+  x.colWidths[totalClassesCol] = 9;
+  x.colWidths[presentCol] = 9;
+  x.colWidths[pctCol] = 12;
+  x.colWidths[marksCol] = 9;
 
   // ---- Row heights ----
-  x.rowHeights[0] = 72;
+  x.rowHeights[0] = 42;
   for (int r = infoRow0; r < infoRow0 + 3; r++) {
-    x.rowHeights[r] = 36;
+    x.rowHeights[r] = 22;
   }
-  x.rowHeights[weekRow] = 44;
-  x.rowHeights[dateRow] = 30;
-  x.rowHeights[serialRow] = 26;
+  x.rowHeights[weekRow] = 26;
+  x.rowHeights[dateRow] = 22;
+  x.rowHeights[serialRow] = 18;
 
   return x.build();
 }
