@@ -1,6 +1,5 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
@@ -8,7 +7,7 @@ plugins {
 android {
     namespace = "com.example.flutter_application_1"
     compileSdk = 36
-    ndkVersion = flutter.ndkVersion
+    flutter.ndkVersion.also { ndkVersion = it }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
