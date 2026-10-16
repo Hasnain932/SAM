@@ -19,7 +19,7 @@ import 'package:archive/archive.dart' as zip;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
 import 'download_stub.dart'
-    if (dart.library.html) 'download_web.dart';
+    if (dart.library.js_interop) 'download_web.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -1289,7 +1289,7 @@ class WelcomeScreen extends StatelessWidget {
   Widget _studentRow(String name, Color c) {
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), // larger rows (3 students)
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
       decoration: BoxDecoration(
         color: const Color(0x33000000),
         borderRadius: BorderRadius.circular(12),
@@ -2452,6 +2452,53 @@ Future<_QRes> _safeQuery(Query<Map<String, dynamic>> query) async {
   }
 }
 
+// ---- Reliable writes ----
+// saved  = server confirmed the write (online)
+// queued = offline or slow: Firestore keeps it on the device and sends it later
+// failed = server refused it (for example Firestore rules)
+enum SaveResult { saved, queued, failed }
+
+Future<SaveResult> fsWrite(Future<void> write, {String what = 'write'}) async {
+  write.ignore(); // errors are handled below, never left unhandled
+  final net = await _netState();
+  if (net != _Net.reachable) {
+    unawaited(write.then((_) {},
+        onError: (Object e) => debugPrint('Firestore $what error: $e')));
+    return SaveResult.queued;
+  }
+  try {
+    await write.timeout(const Duration(seconds: 10));
+    return SaveResult.saved;
+  } on TimeoutException {
+    debugPrint('Firestore $what: slow, still sending in the background');
+    return SaveResult.queued;
+  } catch (e) {
+    debugPrint('Firestore $what error: $e');
+    return SaveResult.failed;
+  }
+}
+
+Future<SaveResult> fsWriteAll(List<Future<void>> writes,
+    {String what = 'write'}) {
+  if (writes.isEmpty) return Future.value(SaveResult.saved);
+  return fsWrite(Future.wait(writes).then((_) {}), what: what);
+}
+
+// After a student write: when the server confirmed it, refresh the SQLite copy
+// from the server right away; when it failed, tell the user.
+Future<void> finishStudentWrite(
+    BuildContext? context, SemRef sem, SaveResult res,
+    {String? subject}) async {
+  if (res == SaveResult.saved) {
+    await LocalDb.refreshSemesterStudents(sem);
+    if (subject != null) await LocalDb.refreshSubjectOverrides(sem, subject);
+  } else if (res == SaveResult.failed && context != null && context.mounted) {
+    showSnack(context,
+        'Could not save to the server. Check Firestore rules and try again.',
+        color: kAbsent);
+  }
+}
+
 // Cache-first live query for StreamBuilders: device cache first, then live updates.
 Stream<QuerySnapshot<Map<String, dynamic>>> liveQuery(
     Query<Map<String, dynamic>> q) {
@@ -2637,6 +2684,7 @@ class _XlsxBuilder {
   final Map<int, double> colWidths = {};
   final List<String> merges = [];
   int freezeRows = 7; // rows kept on top while scrolling (header rows)
+  int freezeCols = 3; // Roll No, Name, Father Name stay while scrolling sideways
 
   int _idx(List<String> list, String xml) {
     final i = list.indexOf(xml);
@@ -2730,7 +2778,7 @@ class _XlsxBuilder {
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
         '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>'
         '<sheetViews><sheetView showGridLines="0" workbookViewId="0" tabSelected="1">'
-        '<pane xSplit="2" ySplit="$freezeRows" topLeftCell="C${freezeRows + 1}" activePane="bottomRight" state="frozen"/>'
+        '<pane xSplit="$freezeCols" ySplit="$freezeRows" topLeftCell="${_excelColLetters(freezeCols)}${freezeRows + 1}" activePane="bottomRight" state="frozen"/>'
         '</sheetView></sheetViews>'
         '<sheetFormatPr defaultRowHeight="22" customHeight="1"/>');
     if (colWidths.isNotEmpty) {
@@ -3012,7 +3060,7 @@ List<int>? buildAttendanceExcelBytes({
   ];
 
   // ---- Columns ----
-  const int firstSessionCol = 2;
+  const int firstSessionCol = 3; // 0 Roll No, 1 Name, 2 Father Name
   final n = records.length;
   final totalClassesCol = firstSessionCol + n;
   final presentCol = totalClassesCol + 1;
@@ -3061,6 +3109,7 @@ List<int>? buildAttendanceExcelBytes({
   // ---- Header rows: Week / Date / Class No. ----
   x.merge(0, weekRow, 0, serialRow, 'Roll No', idHeadStyle);
   x.merge(1, weekRow, 1, serialRow, 'Name', idHeadStyle);
+  x.merge(2, weekRow, 2, serialRow, 'Father Name', idHeadStyle);
 
   DateTime mondayOf(DateTime d) {
     final day = DateTime(d.year, d.month, d.day);
@@ -3144,14 +3193,18 @@ List<int>? buildAttendanceExcelBytes({
   // ---- Student rows ----
   int rowIndex = firstStudentRow;
   int maxName = 4;
+  int maxFather = 11;
   for (final st in students) {
     final roll = st['roll'] ?? '';
     final name = st['name'] ?? '';
+    final father = st['father'] ?? '';
     if (name.length > maxName) maxName = name.length;
+    if (father.length > maxFather) maxFather = father.length;
     int present = 0;
     final alt = (rowIndex - firstStudentRow) % 2 == 1;
     x.text(0, rowIndex, rollOf(roll), alt ? cellStyleAlt : cellStyle);
     x.text(1, rowIndex, name, alt ? nameStyleAlt : nameStyle);
+    x.text(2, rowIndex, father, alt ? nameStyleAlt : nameStyle);
     for (int i = 0; i < n; i++) {
       final isP = (records[i].status[roll] ?? 'P') == 'P';
       if (isP) present++;
@@ -3210,6 +3263,7 @@ List<int>? buildAttendanceExcelBytes({
   for (int c = 2; c <= lastCol; c++) {
     x.colWidths[c] = 9; // all date / info columns equal
   }
+  x.colWidths[2] = (maxFather * 1.1 + 4).clamp(16, 36).toDouble();
   x.colWidths[totalClassesCol] = 9;
   x.colWidths[presentCol] = 9;
   x.colWidths[pctCol] = 12;
@@ -3254,8 +3308,15 @@ int compareStudentKeys(String a, String b) {
   return a.compareTo(b);
 }
 
-List<Map<String, String>> _sortedStudents(Map<String, String> m) {
-  final list = m.entries.map((e) => {'roll': e.key, 'name': e.value}).toList();
+List<Map<String, String>> _sortedStudents(Map<String, String> m,
+    [Map<String, String>? fathers]) {
+  final list = m.entries
+      .map((e) => {
+            'roll': e.key,
+            'name': e.value,
+            'father': fathers?[e.key] ?? '',
+          })
+      .toList();
   list.sort((a, b) => compareStudentKeys(a['roll']!, b['roll']!));
   return list;
 }
@@ -3288,10 +3349,12 @@ Future<int> copyStudentsToSemester(SemRef from, SemRef to) async {
     final key = uniqueStudentKey(rollOf(s['roll']!), taken);
     taken.add(key);
     final name = s['name']!;
+    final father = s['father'] ?? '';
     unawaited(to.students
         .doc(key)
-        .set({'roll': key, 'name': name}).catchError((_) {}));
-    unawaited(LocalDb.upsertStudent(to, key, name));
+        .set({'roll': key, 'name': name, 'father': father}).catchError(
+            (Object e) => debugPrint('Copy student error: $e')));
+    unawaited(LocalDb.upsertStudent(to, key, name, father));
   }
   return src.length;
 }
@@ -3301,14 +3364,18 @@ Future<int> copyStudentsToSemester(SemRef from, SemRef to) async {
 Future<List<Map<String, String>>> loadSemesterStudents(SemRef sem) async {
   final res = await _safeQuery(sem.students);
   final m = <String, String>{};
+  final f = <String, String>{};
   for (final d in res.docs) {
     final data = d.data();
-    m[(data['roll'] ?? d.id).toString()] = (data['name'] ?? '').toString();
+    final k = (data['roll'] ?? d.id).toString();
+    m[k] = (data['name'] ?? '').toString();
+    f[k] = (data['father'] ?? '').toString();
   }
   if (m.isEmpty && res.fromCache) {
     m.addAll(await LocalDb.students(sem));
+    f.addAll(await LocalDb.fathers(sem));
   }
-  return _sortedStudents(m);
+  return _sortedStudents(m, f);
 }
 
 // Subject-level overrides: roll -> {'name': ..., 'kind': 'extra' | 'hidden'}
@@ -3320,6 +3387,7 @@ Future<Map<String, Map<String, String>>> loadOverrides(
     final data = d.data();
     out[(data['roll'] ?? d.id).toString()] = {
       'name': (data['name'] ?? '').toString(),
+      'father': (data['father'] ?? '').toString(),
       'kind': (data['kind'] ?? '').toString(),
     };
   }
@@ -3337,14 +3405,17 @@ Future<List<Map<String, String>>> loadSubjectStudents(
   final master = await masterF;
   final ov = await ovF;
   final m = {for (final s in master) s['roll']!: s['name']!};
+  final f = {for (final s in master) s['roll']!: s['father'] ?? ''};
   ov.forEach((roll, o) {
     if (o['kind'] == 'hidden') {
       m.remove(roll);
+      f.remove(roll);
     } else if (o['kind'] == 'extra') {
       m[roll] = o['name'] ?? '';
+      f[roll] = o['father'] ?? '';
     }
   });
-  return _sortedStudents(m);
+  return _sortedStudents(m, f);
 }
 
 // One attendance record (one date and session) of a subject.
@@ -3751,7 +3822,8 @@ Future<void> renameSubjectEverywhere(
 
 // Changes a student's roll number. Returns the new internal key.
 Future<String> changeStudentRoll(
-    SemRef sem, String oldKey, String newRollRaw, String name) async {
+    SemRef sem, String oldKey, String newRollRaw, String name,
+    [String father = '']) async {
   final newRoll = newRollRaw.trim();
   if (newRoll.isEmpty) throw RenameException('Please enter a roll number.');
   if (newRoll.contains('/') || newRoll.contains('__')) {
@@ -3792,14 +3864,15 @@ Future<String> changeStudentRoll(
       ops.add((b) => b.delete(ov.reference));
     }
   }
-  ops.add((b) => b.set(sem.students.doc(newKey), {'roll': newKey, 'name': name}));
+  ops.add((b) => b.set(sem.students.doc(newKey),
+      {'roll': newKey, 'name': name, 'father': father}));
   ops.add((b) => b.delete(sem.students.doc(oldKey)));
 
   // Attendance moves come first and the student record last. If something fails
   // halfway, just try again: the retry finishes the remaining moves.
   await _commitInChunks(ops);
 
-  await LocalDb.renameStudentKey(sem, oldKey, newKey, name);
+  await LocalDb.renameStudentKey(sem, oldKey, newKey, name, father);
   unawaited(syncLocalDbIfStale(force: true));
   return newKey;
 }
@@ -3938,14 +4011,56 @@ Future<Map<String, dynamic>> _collectBackup() async {
   };
 }
 
+// Web: opens the share sheet. Browsers only allow sharing within a few
+// seconds of a tap, so if that time ran out while the file was being prepared
+// we show a small dialog whose "Share" button gives a fresh tap.
+Future<void> webShareOrDownload(
+    BuildContext context, List<int> bytes, String name,
+    {String? text}) async {
+  final r = await shareBytesNow(bytes, name, text: text);
+  if (r == 'unsupported') {
+    downloadBytes(bytes, name);
+  } else if (r == 'expired' && context.mounted) {
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('File ready'),
+        content: Text(name),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              downloadBytes(bytes, name);
+            },
+            child: const Text('Download'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              final r2 = await shareBytesNow(bytes, name, text: text);
+              if (r2 != 'shared') downloadBytes(bytes, name);
+            },
+            child: const Text('Share'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // Creates the backup file and saves/shares it. Returns the number of records.
-Future<int> createBackupFile() async {
+Future<int> createBackupFile([BuildContext? context]) async {
   final data = await _collectBackup();
   final bytes = Uint8List.fromList(utf8.encode(jsonEncode(data)));
   final name =
       'attendance_backup_${DateFormat('yyyy-MM-dd_HH-mm').format(DateTime.now())}.json';
   if (kIsWeb) {
-    downloadBytes(bytes, name);
+    if (context != null && context.mounted) {
+      await webShareOrDownload(context, bytes, name,
+          text: 'Attendance backup');
+    } else {
+      await saveOrShareBytes(bytes, name, text: 'Attendance backup');
+    }
     return data['count'] as int;
   }
   final dir = await getApplicationDocumentsDirectory();
@@ -3967,7 +4082,7 @@ Future<void> runBackupWithUi(BuildContext context) async {
   }
   if (context.mounted) showSnack(context, 'Preparing backup...');
   try {
-    final n = await createBackupFile();
+    final n = await createBackupFile(context.mounted ? context : null);
     if (context.mounted) showSnack(context, 'Backup ready ($n records)');
   } catch (e) {
     debugPrint('Backup error: $e');
@@ -4225,11 +4340,11 @@ class LocalDb {
     await db.execute(
         'CREATE TABLE semesters (dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, label TEXT, PRIMARY KEY (dept_id, section, semester))');
     await db.execute(
-        'CREATE TABLE students (dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, roll TEXT NOT NULL, name TEXT, PRIMARY KEY (dept_id, section, semester, roll))');
+        'CREATE TABLE students (dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, roll TEXT NOT NULL, name TEXT, father TEXT DEFAULT \'\', PRIMARY KEY (dept_id, section, semester, roll))');
     await db.execute(
         'CREATE TABLE subjects (dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, name TEXT NOT NULL, claimed_by TEXT, claimed_by_name TEXT, PRIMARY KEY (dept_id, section, semester, name))');
     await db.execute(
-        'CREATE TABLE overrides (dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, subject TEXT NOT NULL, roll TEXT NOT NULL, name TEXT, kind TEXT, PRIMARY KEY (dept_id, section, semester, subject, roll))');
+        'CREATE TABLE overrides (dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, subject TEXT NOT NULL, roll TEXT NOT NULL, name TEXT, kind TEXT, father TEXT DEFAULT \'\', PRIMARY KEY (dept_id, section, semester, subject, roll))');
     await db.execute(
         'CREATE TABLE attendance (dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, subject TEXT NOT NULL, session_id TEXT NOT NULL, roll TEXT NOT NULL, status TEXT, marked_time TEXT, marked_by TEXT, marked_by_name TEXT, session_type TEXT, PRIMARY KEY (dept_id, section, semester, subject, session_id, roll))');
     await db.execute(
@@ -4243,7 +4358,7 @@ class LocalDb {
     final path = await filePath();
     _db = await sql.openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: (db, version) async => _createAll(db),
       // v1 -> v2: the structure changed. The local DB is only a Firestore copy, so drop
       // the old tables and recreate them; data refills when online.
@@ -4259,6 +4374,13 @@ class LocalDb {
         if (oldV < 3) {
           await db.execute(
               "ALTER TABLE attendance ADD COLUMN session_type TEXT DEFAULT 'class'");
+        }
+        // v3 -> v4: father name of students (old rows get an empty value).
+        if (oldV < 4) {
+          await db.execute(
+              "ALTER TABLE students ADD COLUMN father TEXT DEFAULT ''");
+          await db.execute(
+              "ALTER TABLE overrides ADD COLUMN father TEXT DEFAULT ''");
         }
       },
     );
@@ -4323,7 +4445,8 @@ class LocalDb {
   }
 
   // ---------------- students ----------------
-  static Future<void> upsertStudent(SemRef s, String roll, String name) {
+  static Future<void> upsertStudent(SemRef s, String roll, String name,
+      [String father = '']) {
     return _run((db) async {
       await db.insert(
         'students',
@@ -4333,6 +4456,7 @@ class LocalDb {
           'semester': s.semester,
           'roll': roll,
           'name': name,
+          'father': father,
         },
         conflictAlgorithm: sql.ConflictAlgorithm.replace,
       );
@@ -4399,7 +4523,8 @@ class LocalDb {
 
   // ---------------- subject-level student overrides ----------------
   static Future<void> upsertOverride(
-      SemRef s, String subject, String roll, String name, String kind) {
+      SemRef s, String subject, String roll, String name, String kind,
+      [String father = '']) {
     return _run((db) async {
       await db.insert(
         'overrides',
@@ -4410,6 +4535,7 @@ class LocalDb {
           'subject': subject,
           'roll': roll,
           'name': name,
+          'father': father,
           'kind': kind,
         },
         conflictAlgorithm: sql.ConflictAlgorithm.replace,
@@ -4611,6 +4737,7 @@ class LocalDb {
           'semester': seg[5],
           'roll': (sd['roll'] ?? d.id).toString(),
           'name': (sd['name'] ?? '').toString(),
+          'father': (sd['father'] ?? '').toString(),
         });
       }
 
@@ -4646,6 +4773,7 @@ class LocalDb {
           'subject': seg[7],
           'roll': (od['roll'] ?? d.id).toString(),
           'name': (od['name'] ?? '').toString(),
+          'father': (od['father'] ?? '').toString(),
           'kind': (od['kind'] ?? '').toString(),
         });
       }
@@ -4754,6 +4882,22 @@ class LocalDb {
     }
   }
 
+  // roll -> father name of the students of a semester (offline fallback).
+  static Future<Map<String, String>> fathers(SemRef s) async {
+    try {
+      final db = await _open();
+      final rows = await db.query('students',
+          where: _semWhere, whereArgs: _semArgs(s));
+      return {
+        for (final r in rows)
+          (r['roll'] ?? '').toString(): (r['father'] ?? '').toString()
+      };
+    } catch (e) {
+      debugPrint('LocalDb fathers error: $e');
+      return {};
+    }
+  }
+
   static Future<Map<String, Map<String, String>>> overrides(
       SemRef s, String subject) async {
     try {
@@ -4765,6 +4909,7 @@ class LocalDb {
         for (final r in rows)
           (r['roll'] ?? '').toString(): {
             'name': (r['name'] ?? '').toString(),
+            'father': (r['father'] ?? '').toString(),
             'kind': (r['kind'] ?? '').toString(),
           }
       };
@@ -4879,6 +5024,83 @@ class LocalDb {
     }
   }
 
+  // Re-reads one semester's students from the SERVER and replaces the SQLite rows,
+  // so SQLite matches Firebase right after a change (father names included).
+  static Future<bool> refreshSemesterStudents(SemRef s) async {
+    try {
+      if ((await _netState()) != _Net.reachable) return false;
+      final snap = await s.students
+          .get(const GetOptions(source: Source.server))
+          .timeout(const Duration(seconds: 10));
+      final db = await _open();
+      await db.transaction((txn) async {
+        await txn.delete('students',
+            where: _semWhere, whereArgs: _semArgs(s));
+        final batch = txn.batch();
+        for (final d in snap.docs) {
+          final sd = d.data();
+          batch.insert(
+            'students',
+            {
+              'dept_id': s.deptId,
+              'section': s.section,
+              'semester': s.semester,
+              'roll': (sd['roll'] ?? d.id).toString(),
+              'name': (sd['name'] ?? '').toString(),
+              'father': (sd['father'] ?? '').toString(),
+            },
+            conflictAlgorithm: sql.ConflictAlgorithm.replace,
+          );
+        }
+        await batch.commit(noResult: true);
+      });
+      return true;
+    } catch (e) {
+      debugPrint('LocalDb refreshSemesterStudents error: $e');
+      return false;
+    }
+  }
+
+  // Same for the subject-level student changes (overrides).
+  static Future<bool> refreshSubjectOverrides(SemRef s, String subject) async {
+    try {
+      if ((await _netState()) != _Net.reachable) return false;
+      final snap = await s
+          .overrides(subject)
+          .get(const GetOptions(source: Source.server))
+          .timeout(const Duration(seconds: 10));
+      final db = await _open();
+      await db.transaction((txn) async {
+        await txn.delete('overrides',
+            where: '$_semWhere AND subject = ?',
+            whereArgs: [..._semArgs(s), subject]);
+        final batch = txn.batch();
+        for (final d in snap.docs) {
+          final od = d.data();
+          batch.insert(
+            'overrides',
+            {
+              'dept_id': s.deptId,
+              'section': s.section,
+              'semester': s.semester,
+              'subject': subject,
+              'roll': (od['roll'] ?? d.id).toString(),
+              'name': (od['name'] ?? '').toString(),
+              'father': (od['father'] ?? '').toString(),
+              'kind': (od['kind'] ?? '').toString(),
+            },
+            conflictAlgorithm: sql.ConflictAlgorithm.replace,
+          );
+        }
+        await batch.commit(noResult: true);
+      });
+      return true;
+    } catch (e) {
+      debugPrint('LocalDb refreshSubjectOverrides error: $e');
+      return false;
+    }
+  }
+
   static Future<void> deleteAllAttendance() {
     return _run((db) async {
       await db.delete('attendance');
@@ -4901,7 +5123,8 @@ class LocalDb {
   }
 
   static Future<void> renameStudentKey(
-      SemRef s, String oldKey, String newKey, String name) {
+      SemRef s, String oldKey, String newKey, String name,
+      [String father = '']) {
     return _run((db) async {
       await db.transaction((txn) async {
         final a = [..._semArgs(s), oldKey];
@@ -4915,6 +5138,7 @@ class LocalDb {
             'semester': s.semester,
             'roll': newKey,
             'name': name,
+            'father': father,
           },
           conflictAlgorithm: sql.ConflictAlgorithm.replace,
         );
@@ -5085,7 +5309,7 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
         var batch = firestore.batch();
         for (var s in initialStudents) {
           batch.set(target.students.doc(s['roll']),
-              {'roll': s['roll'], 'name': s['name']});
+              {'roll': s['roll'], 'name': s['name'], 'father': ''});
         }
         await batch.commit();
       }
@@ -5300,7 +5524,7 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
                         if ((await _netState()) != _Net.reachable) {
                           throw Exception('offline');
                         }
-                        final n = await createBackupFile();
+                        final n = await createBackupFile(mounted ? context : null);
                         setDialogState(() {
                           busy = false;
                           backupNote = 'Backup ready ($n records).';
@@ -6422,25 +6646,143 @@ String _cleanImportedName(String raw) {
   return s.trim();
 }
 
-// 0 = not a name header, 1 = full name, 2 = first name, 3 = last name.
-int _importNameHeaderKind(String raw) {
-  final c = raw
+// ---------------------------------------------------------------------------
+// Smart matching helpers (used by the student import AND the old attendance
+// import). Case, spaces and punctuation don't matter; common spelling
+// variants (Muhammad / Mohammad / Mohd / M., Abdul / Abd ...) are treated as
+// the same word; small typos are tolerated with a safe threshold.
+// ---------------------------------------------------------------------------
+const Map<String, String> _kNameAliases = {
+  'mohammad': 'muhammad',
+  'mohammed': 'muhammad',
+  'muhammed': 'muhammad',
+  'mohamed': 'muhammad',
+  'mohamad': 'muhammad',
+  'muhamad': 'muhammad',
+  'mohd': 'muhammad',
+  'muhd': 'muhammad',
+  'mhd': 'muhammad',
+  'md': 'muhammad',
+  'abd': 'abdul',
+  'abdu': 'abdul',
+  'abdur': 'abdul',
+  'abdel': 'abdul',
+  'rehman': 'rahman',
+};
+
+String _canonPerson(String s) {
+  final t = s
       .toLowerCase()
-      .replaceAll(RegExp(r'[^\p{L}\p{M}\p{N}\s]', unicode: true), ' ')
+      .replaceAll(RegExp(r'[^\p{L}\p{N}\s]', unicode: true), ' ')
       .replaceAll(RegExp(r'\s+'), ' ')
       .trim();
-  if (c.isEmpty || c.length > 32) return 0;
-  if (RegExp(r'father|mother|guardian|parent|husband|spouse').hasMatch(c) ||
-      c.contains('\u092A\u093F\u0924\u093E') ||
-      c.contains('\u092E\u093E\u0924\u093E')) {
-    return 0;
+  if (t.isEmpty) return '';
+  final parts = t.split(' ');
+  for (var i = 0; i < parts.length; i++) {
+    if (i == 0 && parts[i] == 'm' && parts.length > 1) {
+      parts[i] = 'muhammad';
+    } else {
+      parts[i] = _kNameAliases[parts[i]] ?? parts[i];
+    }
   }
-  if (RegExp(r'^(first|given)\b').hasMatch(c) && c.contains('name')) return 2;
-  if (RegExp(r'^(last|sur|family)').hasMatch(c) && c.contains('name')) {
+  return parts.join(' ');
+}
+
+// Same words in any order give the same key ("Khan Ali" == "Ali Khan").
+String _sortedCanon(String s) {
+  final t = _canonPerson(s).split(' ')..sort();
+  return t.join(' ').trim();
+}
+
+int _levenshtein(String a, String b) {
+  if (a == b) return 0;
+  if (a.isEmpty) return b.length;
+  if (b.isEmpty) return a.length;
+  var prev = List<int>.generate(b.length + 1, (i) => i);
+  for (var i = 1; i <= a.length; i++) {
+    final cur = List<int>.filled(b.length + 1, 0);
+    cur[0] = i;
+    for (var j = 1; j <= b.length; j++) {
+      final cost = a.codeUnitAt(i - 1) == b.codeUnitAt(j - 1) ? 0 : 1;
+      var v = prev[j] + 1;
+      if (cur[j - 1] + 1 < v) v = cur[j - 1] + 1;
+      if (prev[j - 1] + cost < v) v = prev[j - 1] + cost;
+      cur[j] = v;
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+double _stringRatio(String a, String b) {
+  final m = a.length > b.length ? a.length : b.length;
+  if (m == 0) return 1;
+  return 1 - _levenshtein(a, b) / m;
+}
+
+// 0..1 similarity of two person names.
+double _personSim(String a, String b) {
+  final x = _canonPerson(a);
+  final y = _canonPerson(b);
+  if (x.isEmpty || y.isEmpty) return 0;
+  if (x == y) return 1;
+  final r1 = _stringRatio(x, y);
+  final r2 = _stringRatio(_sortedCanon(a), _sortedCanon(b));
+  return r1 > r2 ? r1 : r2;
+}
+
+// Father names: true = same person's father, false = clearly different,
+// null = unknown (one of them is empty).
+bool? _fatherCompat(String a, String b) {
+  if (a.trim().isEmpty || b.trim().isEmpty) return null;
+  return _personSim(a, b) >= 0.8;
+}
+
+// ---------------------------------------------------------------------------
+// Student import (Excel .xlsx / .xls / CSV / TXT): Name + Father Name columns.
+// Roll numbers are NOT read from the file; they follow file order.
+// ---------------------------------------------------------------------------
+class ImportedStudent {
+  final String name;
+  final String father;
+  const ImportedStudent(this.name, this.father);
+}
+
+// Header text -> letters only, lowercase. "F. Name" -> "fname", "S/O" -> "so".
+String _compactHeader(String raw) =>
+    raw.toLowerCase().replaceAll(RegExp(r'[^\p{L}\p{M}]', unicode: true), '');
+
+// 0 = not a name header, 1 = full name, 2 = first name, 3 = last name,
+// 4 = father name. The header wording does not matter.
+int _studentHeaderKind(String raw) {
+  final c = _compactHeader(raw);
+  if (c.isEmpty || c.length > 40) return 0;
+  const fatherExact = {
+    'fo', 'fname', 'so', 'do', 'sodo', 'sdo', 'walid', 'wald', 'waldiyat',
+    'guardian', 'gaurdian', 'parent', 'parentname',
+  };
+  if (c.contains('father') ||
+      fatherExact.contains(c) ||
+      c.startsWith('walid') ||
+      c.startsWith('wald') ||
+      c.startsWith('guardian') ||
+      c.contains('पिता') ||
+      c.contains('والد')) {
+    return 4;
+  }
+  if (RegExp(r'mother|husband|spouse').hasMatch(c)) return 0;
+  if ((c.startsWith('first') || c.startsWith('given')) && c.contains('name')) {
+    return 2;
+  }
+  if ((c.startsWith('last') || c.startsWith('sur') || c.startsWith('family')) &&
+      c.contains('name')) {
     return 3;
   }
   if (c == 'student' || c == 'students') return 1;
-  if (RegExp(r'\b(names?|naam)\b').hasMatch(c) || c.contains('\u0928\u093E\u092E')) {
+  if (c.contains('name') ||
+      c.contains('naam') ||
+      c.contains('नाम') ||
+      c.contains('نام')) {
     return 1;
   }
   return 0;
@@ -6452,57 +6794,87 @@ bool _importLooksLikeName(String n) =>
     !RegExp(r'\d').hasMatch(n) &&
     !_importSkipRowRe.hasMatch(n);
 
-List<String> _namesFromRows(List<List<String>> rows) {
-  final data = rows.where((r) => r.any((c) => c.trim().isNotEmpty)).toList();
-  if (data.isEmpty) return [];
+// Father name cell: same cleanup as a name, minus "S/O", "D/O" prefixes.
+String _cleanImportedFather(String raw) {
+  var s = _cleanImportedName(raw);
+  s = s.replaceFirst(
+      RegExp(r'^(s\s*/\s*o|d\s*/\s*o|w\s*/\s*o|son\s+of|daughter\s+of)\s*[:.\-]?\s*',
+          caseSensitive: false),
+      '');
+  s = s.trim();
+  if (!_importLetterRe.hasMatch(s)) return '';
+  const empties = {'na', 'n/a', 'nil', 'none', 'null'};
+  if (empties.contains(s.toLowerCase())) return '';
+  return s;
+}
 
-  final out = <String>[];
-  void add(String raw) {
-    final name = _cleanImportedName(raw);
-    if (name.isEmpty || !_importLetterRe.hasMatch(name)) return;
-    if (_importSkipRowRe.hasMatch(name)) return;
-    out.add(name);
+class _StudentCols {
+  final int firstRow; // first data row
+  final int nameCol; // -1 when first + last name columns are used
+  final int fatherCol; // -1 = none
+  final int firstNameCol;
+  final int lastNameCol;
+  final bool sure; // false: ask the user which column is which
+  const _StudentCols(this.firstRow, this.nameCol, this.fatherCol,
+      this.firstNameCol, this.lastNameCol, this.sure);
+}
+
+// How many cells of each column look like a person's name.
+List<int> _nameLikeCounts(List<List<String>> rows) {
+  var w = 0;
+  for (final r in rows) {
+    if (r.length > w) w = r.length;
   }
+  final out = List<int>.filled(w, 0);
+  for (final r in rows) {
+    for (var c = 0; c < r.length; c++) {
+      if (_importLooksLikeName(_cleanImportedName(r[c]))) out[c]++;
+    }
+  }
+  return out;
+}
 
-  // 1) Find a header row in the first 15 rows (rows above it are ignored). Supports
-  // "Name", "Student Name", "Name of Student", "naam", or separate First / Last Name.
-  var headerRow = -1;
-  var nameCol = -1, firstCol = -1, lastCol = -1;
+_StudentCols? _detectStudentCols(List<List<String>> data) {
+  if (data.isEmpty) return null;
+
+  // 1) A header row in the first 15 rows (title rows above it are ignored).
   final scan = data.length < 15 ? data.length : 15;
-  for (var i = 0; i < scan && headerRow < 0; i++) {
-    var n = -1, f = -1, l = -1;
+  for (var i = 0; i < scan; i++) {
+    var n = -1, f = -1, l = -1, fa = -1;
     for (var c = 0; c < data[i].length; c++) {
-      final k = _importNameHeaderKind(data[i][c]);
-      if (k == 1 && n < 0) {
-        n = c;
-      } else if (k == 2 && f < 0) {
-        f = c;
-      } else if (k == 3 && l < 0) {
-        l = c;
+      switch (_studentHeaderKind(data[i][c])) {
+        case 1:
+          if (n < 0) n = c;
+        case 2:
+          if (f < 0) f = c;
+        case 3:
+          if (l < 0) l = c;
+        case 4:
+          if (fa < 0) fa = c;
       }
     }
-    if (n >= 0 || (f >= 0 && l >= 0)) {
-      headerRow = i;
-      nameCol = n;
-      firstCol = f;
-      lastCol = l;
-    }
-  }
-
-  if (headerRow >= 0) {
-    for (final r in data.skip(headerRow + 1)) {
-      String at(int c) => (c >= 0 && c < r.length) ? r[c] : '';
-      if (nameCol >= 0) {
-        add(at(nameCol));
-      } else {
-        add('${at(firstCol)} ${at(lastCol)}');
+    final hasName = n >= 0 || (f >= 0 && l >= 0);
+    if (!hasName && fa < 0) continue;
+    var nameCol = n;
+    if (!hasName) {
+      // Only a father header was recognised: the name is the best text column left.
+      final counts = _nameLikeCounts(data.skip(i + 1).toList());
+      var best = -1, bestV = 0;
+      for (var c = 0; c < counts.length; c++) {
+        if (c == fa) continue;
+        if (counts[c] > bestV) {
+          bestV = counts[c];
+          best = c;
+        }
       }
+      if (best < 0) continue;
+      nameCol = best;
     }
-    return out;
+    return _StudentCols(i + 1, hasName && n < 0 ? -1 : nameCol, fa, f, l, true);
   }
 
-  // 2) No name header: skip any roll/serial header row, then pick the column that
-  // looks most like names (letters, no digits, several words). Codes like "21CS001" aren't names.
+  // 2) No header: skip a roll / serial header row, then take the text columns
+  // from left to right (first = name, second = father name).
   const headerWords = {
     'roll', 'roll no', 'roll no.', 'roll number', 'rollno', 'sr', 'sr.',
     'sr no', 'sr no.', 'sr#', 's.no', 's no', 'sno', 'serial', 'serial no',
@@ -6511,38 +6883,146 @@ List<String> _namesFromRows(List<List<String>> rows) {
   final firstNorm = data.first
       .map((c) => c.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim())
       .toList();
-  final body = data.skip(firstNorm.any(headerWords.contains) ? 1 : 0).toList();
-  var width = 0;
-  for (final r in body) {
-    if (r.length > width) width = r.length;
-  }
-  var bestCol = 0;
-  var bestScore = -1;
-  for (var c = 0; c < width; c++) {
-    var score = 0;
-    for (final r in body) {
-      if (c >= r.length) continue;
-      final n = _cleanImportedName(r[c]);
-      if (_importLooksLikeName(n)) score += n.contains(' ') ? 3 : 2;
+  final start = firstNorm.any(headerWords.contains) ? 1 : 0;
+  final body = data.skip(start).toList();
+  if (body.isEmpty) return null;
+  final counts = _nameLikeCounts(body);
+  final need = (body.length * 0.5).ceil();
+  final textCols = <int>[
+    for (var c = 0; c < counts.length; c++)
+      if (counts[c] > 0 && counts[c] >= need) c
+  ];
+  if (textCols.isEmpty) {
+    // Weak columns: use the single best one as the name.
+    var best = -1, bestV = 0;
+    for (var c = 0; c < counts.length; c++) {
+      if (counts[c] > bestV) {
+        bestV = counts[c];
+        best = c;
+      }
     }
-    if (score > bestScore) {
-      bestScore = score;
-      bestCol = c;
-    }
+    if (best < 0) return null;
+    return _StudentCols(start, best, -1, -1, -1, true);
   }
-  for (final r in body) {
-    if (bestCol < r.length) add(r[bestCol]);
+  return _StudentCols(start, textCols[0],
+      textCols.length > 1 ? textCols[1] : -1, -1, -1, textCols.length < 2);
+}
+
+List<ImportedStudent> _extractStudents(
+    List<List<String>> data, _StudentCols c) {
+  final out = <ImportedStudent>[];
+  for (final r in data.skip(c.firstRow)) {
+    String at(int i) => (i >= 0 && i < r.length) ? r[i] : '';
+    final raw = c.nameCol >= 0
+        ? at(c.nameCol)
+        : '${at(c.firstNameCol)} ${at(c.lastNameCol)}';
+    final name = _cleanImportedName(raw);
+    if (name.isEmpty || !_importLetterRe.hasMatch(name)) continue;
+    if (_importSkipRowRe.hasMatch(name)) continue;
+    final father = c.fatherCol >= 0 ? _cleanImportedFather(at(c.fatherCol)) : '';
+    out.add(ImportedStudent(name, father));
   }
   return out;
 }
 
-// Pick a file and read the list of names from it. Returns null on error.
-Future<List<String>?> pickStudentNamesFromFile(BuildContext context) async {
+// Small screen: which column is the Name and which is the Father Name.
+// Only shown when the file has no clear headers and several text columns.
+Future<_StudentCols?> _askStudentColumns(
+    BuildContext context, List<List<String>> data, _StudentCols guess) {
+  var width = 0;
+  for (final r in data) {
+    if (r.length > width) width = r.length;
+  }
+  String sample(int c) {
+    final vals = <String>[];
+    for (final r in data.skip(guess.firstRow)) {
+      if (c < r.length && r[c].trim().isNotEmpty) vals.add(r[c].trim());
+      if (vals.length == 3) break;
+    }
+    return vals.join(', ');
+  }
+
+  final cols = <int>[
+    for (var c = 0; c < width; c++)
+      if (sample(c).isNotEmpty) c
+  ];
+  var nameCol = cols.contains(guess.nameCol) ? guess.nameCol : cols.first;
+  var fatherCol = cols.contains(guess.fatherCol) ? guess.fatherCol : -1;
+
+  return showDialog<_StudentCols>(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setS) {
+        DropdownMenuItem<int> item(int c) => DropdownMenuItem<int>(
+              value: c,
+              child: Text('${_excelColLetters(c)}: ${sample(c)}',
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+            );
+        return AlertDialog(
+          title: const Text('Which column is which?'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'This file has no clear headers. Please choose the columns.',
+                  style: TextStyle(color: kMuted, fontSize: 12.5),
+                ),
+                const SizedBox(height: 12),
+                const Text('Student name'),
+                DropdownButton<int>(
+                  isExpanded: true,
+                  value: nameCol,
+                  items: [for (final c in cols) item(c)],
+                  onChanged: (v) => setS(() => nameCol = v ?? nameCol),
+                ),
+                const SizedBox(height: 8),
+                const Text('Father name'),
+                DropdownButton<int>(
+                  isExpanded: true,
+                  value: fatherCol,
+                  items: [
+                    const DropdownMenuItem<int>(value: -1, child: Text('None')),
+                    for (final c in cols) item(c),
+                  ],
+                  onChanged: (v) => setS(() => fatherCol = v ?? fatherCol),
+                ),
+                if (nameCol == fatherCol)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 6),
+                    child: Text('Name and father name must be different columns.',
+                        style: TextStyle(color: kAbsent, fontSize: 12.5)),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: nameCol == fatherCol
+                  ? null
+                  : () => Navigator.pop(ctx,
+                      _StudentCols(guess.firstRow, nameCol, fatherCol, -1, -1, true)),
+              child: const Text('Continue'),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}
+
+// Pick a file and read students (name + father name) from it. Null on error.
+Future<List<ImportedStudent>?> pickStudentsFromFile(BuildContext context) async {
   PlatformFile? f;
   try {
     f = await FilePicker.pickFile(
       type: FileType.custom,
-      allowedExtensions: ['xlsx', 'xlsm', 'csv', 'txt'],
+      allowedExtensions: ['xlsx', 'xlsm', 'xls', 'csv', 'txt'],
     );
   } catch (e) {
     debugPrint('File picker error: $e');
@@ -6563,74 +7043,257 @@ Future<List<String>?> pickStudentNamesFromFile(BuildContext context) async {
   }
 
   final ext = (f.extension ?? f.name.split('.').last).toLowerCase();
-  List<String> names;
+  var grids = <List<List<String>>>[];
   try {
-    if (ext == 'xlsx' || ext == 'xlsm') {
-      var rows = <List<String>>[];
-      for (final r in _allXlsxGrids(bytes, forAttendance: false)) {
-        if (_namesFromRows(r).isNotEmpty) {
-          rows = r;
-          break;
-        }
-      }
-      names = _namesFromRows(rows);
+    final isZip = bytes.length > 3 && bytes[0] == 0x50 && bytes[1] == 0x4B;
+    if (ext == 'xlsx' || ext == 'xlsm' || ext == 'xls' || isZip) {
+      grids = _allXlsxGrids(bytes, forAttendance: false);
     } else if (ext == 'txt') {
       final lines = utf8
           .decode(bytes, allowMalformed: true)
-          .replaceFirst('\uFEFF', '')
+          .replaceFirst('﻿', '')
           .split(RegExp(r'\r?\n'));
-      names = _namesFromRows([
-        for (final l in lines) [l.trim()]
-      ]);
+      grids = [
+        [
+          for (final l in lines) [l.trim()]
+        ]
+      ];
     } else {
-      names = _namesFromRows(
-          _parseCsvText(utf8.decode(bytes, allowMalformed: true)));
+      grids = [_parseCsvText(utf8.decode(bytes, allowMalformed: true))];
     }
   } catch (e) {
     debugPrint('Import parse error: $e');
+  }
+  if (grids.isEmpty) {
     if (!context.mounted) return null;
     _importSnack(context,
-        'Could not read this file. Please use .xlsx, .csv or .txt (old .xls is not supported).');
+        'Could not read this file. Please use .xlsx or .csv (an old .xls may need to be opened and saved as .xlsx).');
     return null;
   }
 
-  if (names.isEmpty) {
+  // First sheet that really contains students.
+  List<List<String>>? data;
+  _StudentCols? cols;
+  for (final g in grids) {
+    final d = g.where((r) => r.any((c) => c.trim().isNotEmpty)).toList();
+    final c = _detectStudentCols(d);
+    if (c != null && _extractStudents(d, c).isNotEmpty) {
+      data = d;
+      cols = c;
+      break;
+    }
+  }
+  if (data == null || cols == null) {
     if (!context.mounted) return null;
     _importSnack(context, 'No student names found in this file.');
     return null;
   }
-  return names;
+
+  if (!cols.sure) {
+    if (!context.mounted) return null;
+    cols = await _askStudentColumns(context, data, cols);
+    if (cols == null) return null;
+  }
+
+  final list = _extractStudents(data, cols);
+  if (list.isEmpty) {
+    if (!context.mounted) return null;
+    _importSnack(context, 'No student names found in this file.');
+    return null;
+  }
+  return list;
 }
 
-// Confirm dialog: asks for the first roll number (default 1), null if cancelled.
-// Shows the resulting roll range live and warns if any rolls are already used.
-Future<int?> confirmStudentImport(
-  BuildContext context,
-  List<String> names,
-  String where, {
-  Set<String> existingRolls = const <String>{},
-}) {
-  final startCtrl = TextEditingController(text: '1');
+// ---- Import plan: new students, father names to fill, conflicts ----
+class FatherConflict {
+  final String key;
+  final String name;
+  final String oldFather;
+  final String newFather;
+  const FatherConflict(this.key, this.name, this.oldFather, this.newFather);
+}
+
+class FuzzyPair {
+  final String fileName;
+  final String appName;
+  const FuzzyPair(this.fileName, this.appName);
+}
+
+class StudentImportPlan {
+  final List<MapEntry<String, String>> fills; // student key -> father to fill
+  final List<FatherConflict> conflicts; // existing father is different
+  final List<ImportedStudent> newOnes; // not in the app yet
+  final List<FuzzyPair> fuzzy; // matched with a small spelling difference
+  final int unchanged; // matched, nothing to change
+  final int fileDupes; // names that appear more than once in the file
+  final int total;
+  const StudentImportPlan({
+    required this.fills,
+    required this.conflicts,
+    required this.newOnes,
+    required this.fuzzy,
+    required this.unchanged,
+    required this.fileDupes,
+    required this.total,
+  });
+  int get matched => fills.length + conflicts.length + unchanged;
+}
+
+// Matches the file against the students already in the app, by NAME.
+// Same name twice: the 1st occurrence in the file goes to the lower roll,
+// the 2nd to the next one (a father name, when known, decides first).
+StudentImportPlan planStudentImport(
+    List<ImportedStudent> imported, List<Map<String, String>> existing) {
+  final byKey = <String, List<int>>{};
+  for (var i = 0; i < existing.length; i++) {
+    (byKey[_sortedCanon(existing[i]['name'] ?? '')] ??= <int>[]).add(i);
+  }
+  final taken = <int>{};
+  final matchOf = <int, int>{};
+  final isFuzzy = <int>{};
+
+  String fatherOf(int e) => existing[e]['father'] ?? '';
+
+  int? pick(List<int> cands, String father) {
+    final free = cands.where((e) => !taken.contains(e)).toList();
+    if (free.isEmpty) return null;
+    if (father.isEmpty) return free.first;
+    for (final e in free) {
+      if (_fatherCompat(fatherOf(e), father) == true) return e;
+    }
+    for (final e in free) {
+      if (_fatherCompat(fatherOf(e), father) == null) return e;
+    }
+    return free.first;
+  }
+
+  for (var i = 0; i < imported.length; i++) {
+    final cands = byKey[_sortedCanon(imported[i].name)];
+    if (cands == null) continue;
+    final e = pick(cands, imported[i].father);
+    if (e != null) {
+      matchOf[i] = e;
+      taken.add(e);
+    }
+  }
+
+  // Small typos: only when exactly one student is clearly the closest.
+  for (var i = 0; i < imported.length; i++) {
+    if (matchOf.containsKey(i)) continue;
+    var best = 0.0, second = 0.0;
+    var bi = -1;
+    for (var e = 0; e < existing.length; e++) {
+      if (taken.contains(e)) continue;
+      if (_fatherCompat(fatherOf(e), imported[i].father) == false) continue;
+      final s = _personSim(imported[i].name, existing[e]['name'] ?? '');
+      if (s > best) {
+        second = best;
+        best = s;
+        bi = e;
+      } else if (s > second) {
+        second = s;
+      }
+    }
+    if (bi >= 0 && best >= 0.9 && best - second >= 0.05) {
+      matchOf[i] = bi;
+      taken.add(bi);
+      isFuzzy.add(i);
+    }
+  }
+
+  final fills = <MapEntry<String, String>>[];
+  final conflicts = <FatherConflict>[];
+  final newOnes = <ImportedStudent>[];
+  final fuzzy = <FuzzyPair>[];
+  var unchanged = 0;
+  for (var i = 0; i < imported.length; i++) {
+    final e = matchOf[i];
+    if (e == null) {
+      newOnes.add(imported[i]);
+      continue;
+    }
+    final s = existing[e];
+    final key = s['roll']!;
+    final oldF = fatherOf(e).trim();
+    final newF = imported[i].father.trim();
+    if (isFuzzy.contains(i)) {
+      fuzzy.add(FuzzyPair(imported[i].name, s['name'] ?? ''));
+    }
+    if (newF.isEmpty) {
+      unchanged++;
+    } else if (oldF.isEmpty) {
+      fills.add(MapEntry(key, newF));
+    } else if (_fatherCompat(oldF, newF) == true) {
+      unchanged++;
+    } else {
+      conflicts.add(FatherConflict(key, s['name'] ?? '', oldF, newF));
+    }
+  }
+
   final seen = <String>{};
   var dupes = 0;
-  for (final n in names) {
-    if (!seen.add(n.toLowerCase())) dupes++;
+  for (final s in imported) {
+    if (!seen.add(_sortedCanon(s.name))) dupes++;
   }
-  return showDialog<int>(
+  return StudentImportPlan(
+    fills: fills,
+    conflicts: conflicts,
+    newOnes: newOnes,
+    fuzzy: fuzzy,
+    unchanged: unchanged,
+    fileDupes: dupes,
+    total: imported.length,
+  );
+}
+
+class StudentImportDecision {
+  final int start; // first roll number for the new students
+  final bool overwrite; // replace different father names with the file's
+  const StudentImportDecision(this.start, this.overwrite);
+}
+
+// Preview + confirm. Null if cancelled.
+Future<StudentImportDecision?> confirmStudentImportPlan(
+  BuildContext context,
+  StudentImportPlan plan,
+  String where,
+  List<Map<String, String>> existing,
+) {
+  final existingRolls = {for (final s in existing) rollOf(s['roll']!)};
+  var maxRoll = 0;
+  for (final r in existingRolls) {
+    final n = int.tryParse(r) ?? 0;
+    if (n > maxRoll) maxRoll = n;
+  }
+  final startCtrl =
+      TextEditingController(text: plan.matched > 0 ? '${maxRoll + 1}' : '1');
+  var overwrite = false;
+  final hasNew = plan.newOnes.isNotEmpty;
+
+  Widget line(String text, {Color? color}) => Padding(
+        padding: const EdgeInsets.only(bottom: 3),
+        child: Text(text, style: TextStyle(fontSize: 13.5, color: color)),
+      );
+
+  return showDialog<StudentImportDecision>(
     context: context,
     builder: (ctx) => StatefulBuilder(
       builder: (ctx, setS) {
         final parsed = int.tryParse(startCtrl.text.trim());
         final int? start = (parsed != null && parsed >= 1) ? parsed : null;
         var clash = 0;
-        if (start != null) {
-          for (var i = 0; i < names.length; i++) {
+        if (hasNew && start != null) {
+          for (var i = 0; i < plan.newOnes.length; i++) {
             if (existingRolls.contains((start + i).toString())) clash++;
           }
         }
+        final work = plan.fills.length +
+            plan.newOnes.length +
+            (overwrite ? plan.conflicts.length : 0);
+        final canImport = work > 0 && (!hasNew || start != null);
         return AlertDialog(
           title: Text(
-              'Import ${names.length} student${names.length == 1 ? '' : 's'}'),
+              'Import ${plan.total} student${plan.total == 1 ? '' : 's'}'),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -6639,47 +7302,93 @@ Future<int?> confirmStudentImport(
                 Text('Into: $where',
                     style: const TextStyle(color: kMuted, fontSize: 12.5)),
                 const SizedBox(height: 10),
-                for (final n in names.take(5))
-                  Text('\u2022 $n', maxLines: 1, overflow: TextOverflow.ellipsis),
-                if (names.length > 5)
-                  Text('\u2026 and ${names.length - 5} more',
-                      style: const TextStyle(color: kMuted)),
-                if (dupes > 0) ...[
+                line('Father names to fill: ${plan.fills.length}',
+                    color: plan.fills.isEmpty ? kMuted : kPresent),
+                line('New students to add: ${plan.newOnes.length}',
+                    color: plan.newOnes.isEmpty ? kMuted : kPresent),
+                line('Already up to date: ${plan.unchanged}', color: kMuted),
+                if (plan.conflicts.isNotEmpty)
+                  line(
+                      'Different father name: ${plan.conflicts.length}'
+                      '${overwrite ? ' (will be replaced)' : ' (skipped)'}',
+                      color: kAbsent),
+                if (plan.conflicts.isNotEmpty) ...[
+                  for (final c in plan.conflicts.take(4))
+                    Text(
+                        '• ${c.name}: ${c.oldFather} → ${c.newFather}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: kMuted, fontSize: 12)),
+                  if (plan.conflicts.length > 4)
+                    Text('… and ${plan.conflicts.length - 4} more',
+                        style: const TextStyle(color: kMuted, fontSize: 12)),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    value: overwrite,
+                    title: const Text('Replace with the file’s father name',
+                        style: TextStyle(fontSize: 13)),
+                    onChanged: (v) => setS(() => overwrite = v),
+                  ),
+                ],
+                if (plan.fuzzy.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  line('Matched with a small spelling difference:',
+                      color: kAccent),
+                  for (final p in plan.fuzzy.take(4))
+                    Text('• ${p.fileName} → ${p.appName}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: kMuted, fontSize: 12)),
+                  if (plan.fuzzy.length > 4)
+                    Text('… and ${plan.fuzzy.length - 4} more',
+                        style: const TextStyle(color: kMuted, fontSize: 12)),
+                ],
+                if (hasNew) ...[
+                  const SizedBox(height: 8),
+                  for (final s in plan.newOnes.take(5))
+                    Text(
+                        '• ${s.name}${s.father.isEmpty ? '' : '  (S/O ${s.father})'}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis),
+                  if (plan.newOnes.length > 5)
+                    Text('… and ${plan.newOnes.length - 5} more',
+                        style: const TextStyle(color: kMuted)),
+                ],
+                if (plan.fileDupes > 0) ...[
                   const SizedBox(height: 8),
                   Text(
-                    '$dupes name${dupes == 1 ? '' : 's'} appear more than once in the file.',
+                    '${plan.fileDupes} name${plan.fileDupes == 1 ? '' : 's'} appear more than once in the file.',
                     style: const TextStyle(color: kAccent, fontSize: 12.5),
                   ),
                 ],
-                const SizedBox(height: 14),
-                const Text(
-                  'Roll numbers are given in file order, counting up from '
-                  'the number you enter (first name = first roll number).',
-                  style: TextStyle(color: kMuted, fontSize: 12.5),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: startCtrl,
-                  autofocus: true,
-                  keyboardType: TextInputType.number,
-                  onChanged: (_) => setS(() {}),
-                  decoration: InputDecoration(
-                    labelText: 'First roll number',
-                    errorText:
-                        start != null ? null : 'Enter a number (1 or more)',
-                    helperText: start != null
-                        ? 'Roll $start to ${start + names.length - 1}'
-                        : null,
+                if (hasNew) ...[
+                  const SizedBox(height: 14),
+                  const Text(
+                    'New students get roll numbers in file order, counting up from the number you enter.',
+                    style: TextStyle(color: kMuted, fontSize: 12.5),
                   ),
-                ),
-                if (clash > 0) ...[
                   const SizedBox(height: 8),
-                  Text(
-                    '$clash of these roll numbers already exist. The new '
-                    'students will be added next to them with the same roll '
-                    'number; nothing is overwritten.',
-                    style: const TextStyle(color: kAccent, fontSize: 12.5),
+                  TextField(
+                    controller: startCtrl,
+                    keyboardType: TextInputType.number,
+                    onChanged: (_) => setS(() {}),
+                    decoration: InputDecoration(
+                      labelText: 'First roll number',
+                      errorText:
+                          start != null ? null : 'Enter a number (1 or more)',
+                      helperText: start != null
+                          ? 'Roll $start to ${start + plan.newOnes.length - 1}'
+                          : null,
+                    ),
                   ),
+                  if (clash > 0) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      '$clash of these roll numbers already exist. The new students will be added next to them with the same roll number; nothing is overwritten.',
+                      style: const TextStyle(color: kAccent, fontSize: 12.5),
+                    ),
+                  ],
                 ],
               ],
             ),
@@ -6690,8 +7399,10 @@ Future<int?> confirmStudentImport(
               child: const Text('Cancel'),
             ),
             TextButton(
-              onPressed:
-                  start != null ? () => Navigator.pop(ctx, start) : null,
+              onPressed: canImport
+                  ? () => Navigator.pop(
+                      ctx, StudentImportDecision(start ?? 1, overwrite))
+                  : null,
               child: const Text('Import'),
             ),
           ],
@@ -6701,6 +7412,7 @@ Future<int?> confirmStudentImport(
   );
 }
 
+
 // Manage students screen (admin: master student list of this semester)
 class ManageStudentsScreen extends StatelessWidget {
   final SemRef sem;
@@ -6708,30 +7420,38 @@ class ManageStudentsScreen extends StatelessWidget {
   const ManageStudentsScreen({super.key, required this.sem, required this.semLabel});
 
   void _showStudentDialog(BuildContext context,
-      {String? existingRoll, String? existingName}) {
+      {String? existingRoll, String? existingName, String? existingFather}) {
     final rollController =
         TextEditingController(text: rollOf(existingRoll ?? ''));
     final nameController = TextEditingController(text: existingName ?? '');
+    final fatherController = TextEditingController(text: existingFather ?? '');
     bool isEditing = existingRoll != null;
 
     showDialog(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: Text(isEditing ? 'Edit Student' : 'Add Student'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: rollController,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'Roll Number'),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(labelText: 'Student Name'),
-            ),
-          ],
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: rollController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'Roll Number'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(labelText: 'Student Name'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: fatherController,
+                decoration: const InputDecoration(labelText: 'Father Name'),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -6742,12 +7462,14 @@ class ManageStudentsScreen extends StatelessWidget {
             onPressed: () async {
               final roll = rollController.text.trim();
               final name = nameController.text.trim();
+              final father =
+                  fatherController.text.replaceAll(RegExp(r'\s+'), ' ').trim();
               if (roll.isEmpty || name.isEmpty) return;
 
               // Roll number changed: move the student and all attendance to the new roll.
               if (existingRoll != null && roll != rollOf(existingRoll)) {
                 Navigator.pop(dialogContext);
-                await _changeRoll(context, existingRoll, roll, name);
+                await _changeRoll(context, existingRoll, roll, name, father);
                 return;
               }
 
@@ -6758,12 +7480,15 @@ class ManageStudentsScreen extends StatelessWidget {
                 final existing = await loadSemesterStudents(sem);
                 key = uniqueStudentKey(roll, existing.map((s) => s['roll']!));
               }
-              unawaited(sem.students
+              // The write is created first, so the list updates at once from the
+              // local cache; SQLite is updated immediately too.
+              final write = sem.students
                   .doc(key)
-                  .set({'roll': key, 'name': name}).catchError((_) {}));
-              unawaited(LocalDb.upsertStudent(sem, key, name));
-
+                  .set({'roll': key, 'name': name, 'father': father});
+              unawaited(LocalDb.upsertStudent(sem, key, name, father));
               if (dialogContext.mounted) Navigator.pop(dialogContext);
+              final res = await fsWrite(write, what: 'student');
+              await finishStudentWrite(context.mounted ? context : null, sem, res);
             },
             child: Text(isEditing ? 'Save' : 'Add'),
           ),
@@ -6773,7 +7498,8 @@ class ManageStudentsScreen extends StatelessWidget {
   }
 
   Future<void> _changeRoll(
-      BuildContext context, String oldKey, String newRoll, String name) async {
+      BuildContext context, String oldKey, String newRoll, String name,
+      [String father = '']) async {
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -6784,7 +7510,7 @@ class ManageStudentsScreen extends StatelessWidget {
     );
     String? err;
     try {
-      await changeStudentRoll(sem, oldKey, newRoll, name);
+      await changeStudentRoll(sem, oldKey, newRoll, name, father);
     } on RenameException catch (e) {
       err = e.message;
     } catch (_) {
@@ -6857,33 +7583,67 @@ class ManageStudentsScreen extends StatelessWidget {
   }
 
   Future<void> _importStudents(BuildContext context) async {
-    final names = await pickStudentNamesFromFile(context);
-    if (names == null || !context.mounted) return;
+    final list = await pickStudentsFromFile(context);
+    if (list == null || !context.mounted) return;
     final existing = await loadSemesterStudents(sem);
     if (!context.mounted) return;
+    final plan = planStudentImport(list, existing);
+    final decision = await confirmStudentImportPlan(
+        context, plan, '$semLabel ${sem.section}', existing);
+    if (decision == null) return;
+
+    final byKey = {for (final s in existing) s['roll']!: s};
     final taken = existing.map((s) => s['roll']!).toSet();
-    final start = await confirmStudentImport(
-        context, names, '$semLabel ${sem.section}',
-        existingRolls: taken.map(rollOf).toSet());
-    if (start == null) return;
     var batch = FirebaseFirestore.instance.batch();
     var ops = 0;
-    for (var i = 0; i < names.length; i++) {
-      // If the roll exists, a new unique key is created; nothing is overwritten.
-      final key = uniqueStudentKey((start + i).toString(), taken);
-      taken.add(key);
-      batch.set(sem.students.doc(key), {'roll': key, 'name': names[i]});
-      unawaited(LocalDb.upsertStudent(sem, key, names[i]));
+    final commits = <Future<void>>[];
+    void flushIfFull() {
       if (++ops >= 400) {
-        unawaited(batch.commit().catchError((_) {}));
+        commits.add(batch.commit());
         batch = FirebaseFirestore.instance.batch();
         ops = 0;
       }
     }
-    if (ops > 0) unawaited(batch.commit().catchError((_) {}));
+
+    // 1) Existing students: only the father name is filled (no duplicates).
+    final fatherWrites = <MapEntry<String, String>>[
+      ...plan.fills,
+      if (decision.overwrite)
+        for (final c in plan.conflicts) MapEntry(c.key, c.newFather),
+    ];
+    for (final w in fatherWrites) {
+      final name = byKey[w.key]?['name'] ?? '';
+      batch.set(sem.students.doc(w.key), {'father': w.value},
+          SetOptions(merge: true));
+      unawaited(LocalDb.upsertStudent(sem, w.key, name, w.value));
+      flushIfFull();
+    }
+
+    // 2) New students: roll numbers follow file order from the chosen start.
+    for (var i = 0; i < plan.newOnes.length; i++) {
+      // If the roll exists, a new unique key is created; nothing is overwritten.
+      final key = uniqueStudentKey((decision.start + i).toString(), taken);
+      taken.add(key);
+      final s = plan.newOnes[i];
+      batch.set(sem.students.doc(key),
+          {'roll': key, 'name': s.name, 'father': s.father});
+      unawaited(LocalDb.upsertStudent(sem, key, s.name, s.father));
+      flushIfFull();
+    }
+    if (ops > 0) commits.add(batch.commit());
     if (!context.mounted) return;
-    _importSnack(context,
-        '${names.length} student${names.length == 1 ? '' : 's'} imported (roll $start to ${start + names.length - 1})');
+
+    final skipped = decision.overwrite ? 0 : plan.conflicts.length;
+    final parts = <String>[
+      '${fatherWrites.length} father name${fatherWrites.length == 1 ? '' : 's'} filled',
+      '${plan.newOnes.length} new student${plan.newOnes.length == 1 ? '' : 's'} added',
+      if (skipped > 0) '$skipped skipped (different father name)',
+    ];
+    _importSnack(context, parts.join(', '));
+
+    // Online: wait for the server, then refresh SQLite from it. A failure is shown.
+    final res = await fsWriteAll(commits, what: 'student import');
+    await finishStudentWrite(context.mounted ? context : null, sem, res);
   }
 
   void _confirmDeleteStudent(BuildContext context, String roll, String name) {
@@ -6900,8 +7660,12 @@ class ManageStudentsScreen extends StatelessWidget {
           TextButton(
             onPressed: () async {
               Navigator.pop(context);
-              unawaited(sem.students.doc(roll).delete().catchError((_) {}));
+              final write = sem.students.doc(roll).delete();
               unawaited(LocalDb.deleteStudent(sem, roll));
+              final res = await fsWrite(write, what: 'delete student');
+              if (res == SaveResult.saved) {
+                unawaited(LocalDb.refreshSemesterStudents(sem));
+              }
             },
             child: const Text('Delete', style: TextStyle(color: kAbsent)),
           ),
@@ -6959,6 +7723,7 @@ class ManageStudentsScreen extends StatelessWidget {
               final data = docs[index].data();
               final roll = (data['roll'] ?? docs[index].id).toString();
               final name = (data['name'] ?? '').toString();
+              final father = (data['father'] ?? '').toString();
 
               return AppCard(
  float: false,
@@ -6969,13 +7734,14 @@ class ManageStudentsScreen extends StatelessWidget {
                     RollBadge(roll: roll),
                     const SizedBox(width: 12),
                     Expanded(
-                      child: Text(name,
-                          style: const TextStyle(fontWeight: FontWeight.w700)),
+                      child: StudentNameBlock(name: name, father: father),
                     ),
                     IconButton(
                       icon: const Icon(Icons.edit_outlined, color: kAccent),
                       onPressed: () => _showStudentDialog(context,
-                          existingRoll: roll, existingName: name),
+                          existingRoll: roll,
+                          existingName: name,
+                          existingFather: father),
                     ),
                     IconButton(
                       icon: const Icon(Icons.delete_outline, color: kAbsent),
@@ -6988,6 +7754,44 @@ class ManageStudentsScreen extends StatelessWidget {
           );
         },
       ),
+    );
+  }
+}
+
+// Student name with the father name as a smaller muted line under it.
+// Old students without a father name show just the name.
+class StudentNameBlock extends StatelessWidget {
+  final String name;
+  final String father;
+  final Color? color;
+  final String? extra; // optional extra line (e.g. attendance percentage)
+  final Color? extraColor;
+  const StudentNameBlock({
+    super.key,
+    required this.name,
+    this.father = '',
+    this.color,
+    this.extra,
+    this.extraColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(name,
+            style: TextStyle(fontWeight: FontWeight.w700, color: color)),
+        if (father.trim().isNotEmpty)
+          Text('S/O ${father.trim()}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12, color: kMuted)),
+        if (extra != null)
+          Text(extra!,
+              style: TextStyle(fontSize: 12.5, color: extraColor ?? kMuted)),
+      ],
     );
   }
 }
@@ -7029,7 +7833,8 @@ class SubjectStudentsScreen extends StatefulWidget {
 class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
   bool _loading = true;
   Map<String, String> _master = {};
-  // roll -> {'name': ..., 'kind': 'extra' | 'hidden'}
+  Map<String, String> _masterFather = {};
+  // roll -> {'name': ..., 'father': ..., 'kind': 'extra' | 'hidden'}
   Map<String, Map<String, String>> _overrides = {};
 
   @override
@@ -7045,10 +7850,14 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
       final master = await masterF;
       _overrides = await ovF;
       _master = {for (final s in master) s['roll']!: s['name']!};
+      _masterFather = {for (final s in master) s['roll']!: s['father'] ?? ''};
     } catch (e) {
       debugPrint('Subject students load error: $e');
     }
     if (mounted) setState(() => _loading = false);
+    // Online: bring SQLite in line with Firebase for this subject.
+    unawaited(LocalDb.refreshSemesterStudents(widget.sem));
+    unawaited(LocalDb.refreshSubjectOverrides(widget.sem, widget.subjectName));
   }
 
   Map<String, String> get _effective {
@@ -7063,27 +7872,47 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
     return m;
   }
 
+  Map<String, String> get _effectiveFather {
+    final m = Map<String, String>.from(_masterFather);
+    _overrides.forEach((roll, o) {
+      if (o['kind'] == 'hidden') {
+        m.remove(roll);
+      } else if (o['kind'] == 'extra') {
+        m[roll] = o['father'] ?? '';
+      }
+    });
+    return m;
+  }
+
   void _addStudent() {
     final rollController = TextEditingController();
     final nameController = TextEditingController();
+    final fatherController = TextEditingController();
     showDialog(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Add student to this subject'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: rollController,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'Roll Number'),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(labelText: 'Student Name'),
-            ),
-          ],
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: rollController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'Roll Number'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(labelText: 'Student Name'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: fatherController,
+                decoration: const InputDecoration(labelText: 'Father Name'),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -7091,23 +7920,31 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
             child: const Text('Cancel'),
           ),
           TextButton(
-            onPressed: () {
+            onPressed: () async {
               final typedRoll = rollController.text.trim();
               final name = nameController.text.trim();
+              final father =
+                  fatherController.text.replaceAll(RegExp(r'\s+'), ' ').trim();
               if (typedRoll.isEmpty || name.isEmpty) return;
               // If the roll already exists (master / extra / hidden), create a unique key.
               final roll = uniqueStudentKey(
                   typedRoll, [..._master.keys, ..._overrides.keys]);
               final sem = widget.sem;
               final sub = widget.subjectName;
-              unawaited(sem.overrides(sub).doc(roll).set({
+              final write = sem.overrides(sub).doc(roll).set({
                 'roll': roll,
                 'name': name,
+                'father': father,
                 'kind': 'extra',
-              }).catchError((_) {}));
-              unawaited(LocalDb.upsertOverride(sem, sub, roll, name, 'extra'));
-              setState(() => _overrides[roll] = {'name': name, 'kind': 'extra'});
+              });
+              unawaited(
+                  LocalDb.upsertOverride(sem, sub, roll, name, 'extra', father));
+              setState(() => _overrides[roll] =
+                  {'name': name, 'father': father, 'kind': 'extra'});
               Navigator.pop(dialogContext);
+              final res = await fsWrite(write, what: 'subject student');
+              if (!mounted) return;
+              await finishStudentWrite(context, sem, res, subject: sub);
             },
             child: const Text('Add'),
           ),
@@ -7117,40 +7954,121 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
   }
 
   Future<void> _importStudents() async {
-    final names = await pickStudentNamesFromFile(context);
-    if (names == null || !mounted) return;
+    final list = await pickStudentsFromFile(context);
+    if (list == null || !mounted) return;
     final taken = {..._master.keys, ..._overrides.keys};
-    final start = await confirmStudentImport(
-        context, names, '${widget.subjectName} (this subject)',
-        existingRolls: taken.map(rollOf).toSet());
-    if (start == null || !mounted) return;
+    // Students already in this subject: match by name so father names get
+    // filled for them too, and only really new names are added.
+    final eff = _effective;
+    final effFather = _effectiveFather;
+    final inSubject = [
+      for (final e in eff.entries)
+        {'roll': e.key, 'name': e.value, 'father': effFather[e.key] ?? ''}
+    ];
+    final plan = planStudentImport(list, inSubject);
+    final decision = await confirmStudentImportPlan(
+        context,
+        plan,
+        '${widget.subjectName} (this subject)',
+        [for (final k in taken) {'roll': k, 'name': ''}]);
+    if (decision == null || !mounted) return;
+    final start = decision.start;
 
     final sem = widget.sem;
     final sub = widget.subjectName;
     var batch = FirebaseFirestore.instance.batch();
     var ops = 0;
-    final added = <String, Map<String, String>>{};
-    for (var i = 0; i < names.length; i++) {
-      final key = uniqueStudentKey((start + i).toString(), taken);
-      taken.add(key);
-      batch.set(sem.overrides(sub).doc(key),
-          {'roll': key, 'name': names[i], 'kind': 'extra'});
-      unawaited(LocalDb.upsertOverride(sem, sub, key, names[i], 'extra'));
-      added[key] = {'name': names[i], 'kind': 'extra'};
+    final commits = <Future<void>>[];
+    void flushIfFull() {
       if (++ops >= 400) {
-        unawaited(batch.commit().catchError((_) {}));
+        commits.add(batch.commit());
         batch = FirebaseFirestore.instance.batch();
         ops = 0;
       }
     }
-    if (ops > 0) unawaited(batch.commit().catchError((_) {}));
+
+    final added = <String, Map<String, String>>{};
+    // Students of the master list that get a NEW father name: the father name is
+    // also saved on the master student (students collection), in its own batch
+    // so a permission problem there never blocks the subject changes.
+    final masterFills = <MapEntry<String, String>>[
+      for (final w in plan.fills)
+        if (_master.containsKey(w.key)) w
+    ];
+
+    // 1) Existing students: only the father name is filled (this subject only).
+    final fatherWrites = <MapEntry<String, String>>[
+      ...plan.fills,
+      if (decision.overwrite)
+        for (final c in plan.conflicts) MapEntry(c.key, c.newFather),
+    ];
+    for (final w in fatherWrites) {
+      final name = eff[w.key] ?? '';
+      batch.set(sem.overrides(sub).doc(w.key), {
+        'roll': w.key,
+        'name': name,
+        'father': w.value,
+        'kind': 'extra',
+      });
+      unawaited(
+          LocalDb.upsertOverride(sem, sub, w.key, name, 'extra', w.value));
+      added[w.key] = {'name': name, 'father': w.value, 'kind': 'extra'};
+      flushIfFull();
+    }
+    final masterCommits = <Future<void>>[];
+    for (var i = 0; i < masterFills.length; i += 400) {
+      final mb = FirebaseFirestore.instance.batch();
+      for (final w in masterFills.skip(i).take(400)) {
+        mb.set(sem.students.doc(w.key), {'father': w.value},
+            SetOptions(merge: true));
+        unawaited(LocalDb.upsertStudent(sem, w.key, _master[w.key] ?? '', w.value));
+        _masterFather[w.key] = w.value;
+      }
+      masterCommits.add(mb.commit());
+    }
+
+    // 2) New students: roll numbers follow file order from the chosen start.
+    for (var i = 0; i < plan.newOnes.length; i++) {
+      final st = plan.newOnes[i];
+      final key = uniqueStudentKey((start + i).toString(), taken);
+      taken.add(key);
+      batch.set(sem.overrides(sub).doc(key), {
+        'roll': key,
+        'name': st.name,
+        'father': st.father,
+        'kind': 'extra',
+      });
+      unawaited(
+          LocalDb.upsertOverride(sem, sub, key, st.name, 'extra', st.father));
+      added[key] = {'name': st.name, 'father': st.father, 'kind': 'extra'};
+      flushIfFull();
+    }
+    if (ops > 0) commits.add(batch.commit());
     if (!mounted) return;
     setState(() => _overrides.addAll(added));
-    _importSnack(context,
-        '${names.length} student${names.length == 1 ? '' : 's'} imported (roll $start to ${start + names.length - 1})');
+
+    final n = plan.newOnes.length;
+    final skipped = decision.overwrite ? 0 : plan.conflicts.length;
+    final parts = <String>[
+      '${fatherWrites.length} father name${fatherWrites.length == 1 ? '' : 's'} filled',
+      '$n new student${n == 1 ? '' : 's'} added',
+      if (skipped > 0) '$skipped skipped (different father name)',
+    ];
+    _importSnack(context, parts.join(', '));
+
+    final res = await fsWriteAll(commits, what: 'subject import');
+    final masterRes = await fsWriteAll(masterCommits, what: 'master father fill');
+    if (!mounted) return;
+    await finishStudentWrite(
+        context, sem, res == SaveResult.saved ? masterRes : res,
+        subject: sub);
+    if (res == SaveResult.saved) {
+      await LocalDb.refreshSubjectOverrides(sem, sub);
+    }
   }
 
   void _removeStudent(String roll, String name) {
+    final father = _effectiveFather[roll] ?? '';
     showDialog(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -7168,16 +8086,32 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
               final sub = widget.subjectName;
               if (_master.containsKey(roll)) {
                 // Student from the master list: add a "hidden" marker
-                unawaited(sem.overrides(sub).doc(roll).set({
-                  'roll': roll,
-                  'name': name,
-                  'kind': 'hidden',
-                }).catchError((_) {}));
-                unawaited(LocalDb.upsertOverride(sem, sub, roll, name, 'hidden'));
-                setState(() => _overrides[roll] = {'name': name, 'kind': 'hidden'});
+                unawaited(fsWrite(
+                        sem.overrides(sub).doc(roll).set({
+                          'roll': roll,
+                          'name': name,
+                          'father': father,
+                          'kind': 'hidden',
+                        }),
+                        what: 'hide student')
+                    .then((r) {
+                  if (r == SaveResult.saved) {
+                    unawaited(LocalDb.refreshSubjectOverrides(sem, sub));
+                  }
+                }));
+                unawaited(
+                    LocalDb.upsertOverride(sem, sub, roll, name, 'hidden', father));
+                setState(() => _overrides[roll] =
+                    {'name': name, 'father': father, 'kind': 'hidden'});
               } else {
                 // Student added only to this subject: remove the override
-                unawaited(sem.overrides(sub).doc(roll).delete().catchError((_) {}));
+                unawaited(fsWrite(sem.overrides(sub).doc(roll).delete(),
+                        what: 'remove student')
+                    .then((r) {
+                  if (r == SaveResult.saved) {
+                    unawaited(LocalDb.refreshSubjectOverrides(sem, sub));
+                  }
+                }));
                 unawaited(LocalDb.deleteOverride(sem, sub, roll));
                 setState(() => _overrides.remove(roll));
               }
@@ -7192,7 +8126,7 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final list = _sortedStudents(_effective);
+    final list = _sortedStudents(_effective, _effectiveFather);
     return Scaffold(
       appBar: AppBar(
         title: Text('${widget.subjectName} • Students'),
@@ -7238,9 +8172,9 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
                                   RollBadge(roll: s['roll']!),
                                   const SizedBox(width: 12),
                                   Expanded(
-                                    child: Text(s['name']!,
-                                        style: const TextStyle(
-                                            fontWeight: FontWeight.w700)),
+                                    child: StudentNameBlock(
+                                        name: s['name']!,
+                                        father: s['father'] ?? ''),
                                   ),
                                   IconButton(
                                     icon: const Icon(Icons.person_remove_outlined,
@@ -7350,7 +8284,8 @@ class ImportRow {
   final String name;
   final String roll; // roll from the file (only if there is a 'Roll' column)
   final Map<int, String> status; // column index -> 'P' / 'A'
-  ImportRow(this.name, this.roll, this.status);
+  final String father; // father name from the file ('' if there is no column)
+  ImportRow(this.name, this.roll, this.status, [this.father = '']);
 }
 
 class ImportSheet {
@@ -7760,7 +8695,9 @@ class _ImportLongRec {
   final DateTime date;
   final int sess;
   final String status;
-  _ImportLongRec(this.name, this.roll, this.date, this.sess, this.status);
+  final String father;
+  _ImportLongRec(this.name, this.roll, this.date, this.sess, this.status,
+      [this.father = '']);
 }
 
 final RegExp _importSessionRe = RegExp(
@@ -7774,9 +8711,12 @@ final RegExp _importSkipNameRe = RegExp(
 bool _importIsNameHeader(String raw) {
   final t = raw.trim().toLowerCase();
   if (t.isEmpty) return false;
+  if (_studentHeaderKind(raw) == 4) return false; // F. Name, S/O, Walid ...
   if (RegExp(r'father|mother|parent|guardian').hasMatch(t)) return false;
   return t == 'student' || t == 'naam' || t.contains('name');
 }
+
+bool _importIsFatherHeader(String raw) => _studentHeaderKind(raw) == 4;
 
 bool _importIsRollHeader(String raw) {
   final t = raw.trim().toLowerCase();
@@ -7937,11 +8877,23 @@ _ImportDraft? _importParseWide(List<List<String>> g) {
   final dateKeys = dates.keys.toList()..sort();
   final firstDateCol = dateKeys.first;
 
+  // Father name column: any header like Father Name / F/O / S/O / Walid / Guardian.
+  var fatherCol = -1;
+  for (var c = 0; c < nC && fatherCol < 0; c++) {
+    if (dates.containsKey(c)) continue;
+    for (var r = 0; r <= dateRow + 2 && r < nR; r++) {
+      if (_importIsFatherHeader(cell(r, c))) {
+        fatherCol = c;
+        break;
+      }
+    }
+  }
+
   // Name column: the one with 'name' in its header, else the one with the most text.
   var nameCol = -1;
   var bestScore = 0.0;
   for (var c = 0; c < nC; c++) {
-    if (dates.containsKey(c)) continue;
+    if (dates.containsKey(c) || c == fatherCol) continue;
     var bonus = 0.0;
     for (var r = 0; r <= dateRow + 2 && r < nR; r++) {
       if (_importIsNameHeader(cell(r, c))) {
@@ -7975,7 +8927,7 @@ _ImportDraft? _importParseWide(List<List<String>> g) {
   // Roll column: only if the header has roll / reg / enrol / admission.
   var rollCol = -1;
   for (var c = 0; c < nC && rollCol < 0; c++) {
-    if (c == nameCol || dates.containsKey(c)) continue;
+    if (c == nameCol || c == fatherCol || dates.containsKey(c)) continue;
     for (var r = 0; r <= dateRow + 2 && r < nR; r++) {
       if (_importIsRollHeader(cell(r, c))) {
         rollCol = c;
@@ -8004,7 +8956,9 @@ _ImportDraft? _importParseWide(List<List<String>> g) {
   final colDate = Map<int, DateTime>.from(dates);
   for (final c in dateKeys) {
     for (var k = c + 1; k < nC; k++) {
-      if (dates.containsKey(k) || k == nameCol || k == rollCol) break;
+      if (dates.containsKey(k) || k == nameCol || k == rollCol || k == fatherCol) {
+        break;
+      }
       if (cell(dateRow, k).isNotEmpty) break;
       var hits = 0;
       for (final r in nameRows) {
@@ -8058,7 +9012,11 @@ _ImportDraft? _importParseWide(List<List<String>> g) {
       if (v != null) st[col.col] = v;
     }
     if (st.isEmpty) continue;
-    outRows.add(ImportRow(names[r]!, rollCol >= 0 ? cell(r, rollCol) : '', st));
+    outRows.add(ImportRow(
+        names[r]!,
+        rollCol >= 0 ? cell(r, rollCol) : '',
+        st,
+        fatherCol >= 0 ? _cleanImportedFather(cell(r, fatherCol)) : ''));
   }
   if (outRows.isEmpty) return null;
 
@@ -8110,10 +9068,16 @@ _ImportDraft? _importParseLong(List<List<String>> g) {
     return false;
   }
 
+  var fatherCol = -1;
+  for (var c = 0; c < nC && fatherCol < 0; c++) {
+    if (c == dateCol || c == statusCol) continue;
+    if (headerHas(c, _importIsFatherHeader)) fatherCol = c;
+  }
+
   var nameCol = -1;
   var bestScore = 0.0;
   for (var c = 0; c < nC; c++) {
-    if (c == dateCol || c == statusCol) continue;
+    if (c == dateCol || c == statusCol || c == fatherCol) continue;
     var txt = 0;
     for (var r = 0; r < nR; r++) {
       final t = g[r][c];
@@ -8135,7 +9099,9 @@ _ImportDraft? _importParseLong(List<List<String>> g) {
   var sessCol = -1;
   final sessHeaderRe = RegExp(r'session|lecture|period|slot', caseSensitive: false);
   for (var c = 0; c < nC; c++) {
-    if (c == dateCol || c == statusCol || c == nameCol) continue;
+    if (c == dateCol || c == statusCol || c == nameCol || c == fatherCol) {
+      continue;
+    }
     if (rollCol < 0 && headerHas(c, _importIsRollHeader)) rollCol = c;
     if (sessCol < 0 && headerHas(c, (t) => sessHeaderRe.hasMatch(t))) sessCol = c;
   }
@@ -8149,8 +9115,10 @@ _ImportDraft? _importParseLong(List<List<String>> g) {
     if (d == null || st == null) continue;
     if (name.isEmpty || !_importLetterRe.hasMatch(name)) continue;
     if (_importSkipNameRe.hasMatch(name)) continue;
+    final father =
+        fatherCol >= 0 ? _cleanImportedFather(g[r][fatherCol]) : '';
     final dayKey = DateFormat('yyyy-MM-dd').format(d);
-    final ok = '$dayKey|${_normImportName(name)}';
+    final ok = '$dayKey|${_normImportName(name)}|${_normImportName(father)}';
     final n = (occ[ok] ?? 0) + 1;
     occ[ok] = n;
     var sess = n;
@@ -8160,7 +9128,7 @@ _ImportDraft? _importParseLong(List<List<String>> g) {
       if (v != null && v > 0) sess = v;
     }
     recs.add(_ImportLongRec(
-        name, rollCol >= 0 ? g[r][rollCol] : '', d, sess, st));
+        name, rollCol >= 0 ? g[r][rollCol] : '', d, sess, st, father));
   }
   if (recs.isEmpty) return null;
 
@@ -8181,9 +9149,9 @@ _ImportDraft? _importParseLong(List<List<String>> g) {
 
   final byName = <String, ImportRow>{};
   for (final x in recs) {
-    final nk = _normImportName(x.name);
-    final row =
-        byName.putIfAbsent(nk, () => ImportRow(x.name, x.roll, <int, String>{}));
+    final nk = '${_normImportName(x.name)}|${_normImportName(x.father)}';
+    final row = byName.putIfAbsent(
+        nk, () => ImportRow(x.name, x.roll, <int, String>{}, x.father));
     row.status[colId[keyOf(x)]!] = x.status;
   }
   return _ImportDraft(columns, byName.values.toList());
@@ -8214,38 +9182,88 @@ String _normImportName(String s) => s
     .replaceAll(RegExp(r'\s+'), ' ')
     .trim();
 
-String _sortedImportName(String s) {
-  final t = _normImportName(s).split(' ')..sort();
-  return t.join(' ');
-}
-
-// Matches file names to app students. Only sure matches count (full name, same words
-// in another order, or roll number); the rest are shown to the user.
+// Matches file rows to app students. Only sure matches count; the rest are shown
+// to the user. Order of checks:
+//   1) same name (any word order, spelling variants like Muhammad / Mohd / M.)
+//      - when the file has a father name, name + father name must agree;
+//      - same name twice: the father name decides first, and only if that cannot
+//        decide, the Nth row in the file goes to the Nth student (roll order);
+//   2) roll number, 3) a unique close spelling (typo) with a compatible father.
 Map<int, String> autoMatchImportRows(
     List<ImportRow> rows, List<Map<String, String>> students) {
   final result = <int, String>{};
   final taken = <String>{};
+  void take(int i, Map<String, String> s) {
+    result[i] = s['roll']!;
+    taken.add(s['roll']!);
+  }
 
-  void pass(bool Function(ImportRow row, Map<String, String> s) same) {
-    for (var i = 0; i < rows.length; i++) {
-      if (result.containsKey(i)) continue;
-      for (final s in students) {
-        final key = s['roll']!;
-        if (taken.contains(key)) continue;
-        if (same(rows[i], s)) {
-          result[i] = key;
-          taken.add(key);
-          break;
-        }
+  final byKey = <String, List<Map<String, String>>>{};
+  for (final s in students) {
+    (byKey[_sortedCanon(s['name'] ?? '')] ??= <Map<String, String>>[]).add(s);
+  }
+  List<Map<String, String>> freeOf(int i) => [
+        for (final s in byKey[_sortedCanon(rows[i].name)] ??
+            const <Map<String, String>>[])
+          if (!taken.contains(s['roll']!)) s
+      ];
+
+  // 1a) rows that have a father name: name + father name together.
+  for (var i = 0; i < rows.length; i++) {
+    final f = rows[i].father;
+    if (f.isEmpty) continue;
+    for (final s in freeOf(i)) {
+      if (_fatherCompat(s['father'] ?? '', f) == true) {
+        take(i, s);
+        break;
       }
     }
   }
 
-  pass((r, s) => _normImportName(r.name) == _normImportName(s['name'] ?? ''));
-  pass((r, s) =>
-      _sortedImportName(r.name) == _sortedImportName(s['name'] ?? ''));
-  pass((r, s) =>
-      r.roll.isNotEmpty && r.roll.trim() == rollOf(s['roll']!).trim());
+  // 1b) the rest: same name. Students with no father name filled yet are fine;
+  // a student whose father name is clearly different is never taken.
+  for (var i = 0; i < rows.length; i++) {
+    if (result.containsKey(i)) continue;
+    final f = rows[i].father;
+    for (final s in freeOf(i)) {
+      if (f.isEmpty || _fatherCompat(s['father'] ?? '', f) == null) {
+        take(i, s);
+        break;
+      }
+    }
+  }
+
+  // 2) roll number from the file (only if the father name does not contradict it)
+  for (var i = 0; i < rows.length; i++) {
+    if (result.containsKey(i) || rows[i].roll.isEmpty) continue;
+    for (final s in students) {
+      if (taken.contains(s['roll']!)) continue;
+      if (rows[i].roll.trim() != rollOf(s['roll']!).trim()) continue;
+      if (_fatherCompat(s['father'] ?? '', rows[i].father) == false) continue;
+      take(i, s);
+      break;
+    }
+  }
+
+  // 3) small typos: only when exactly one student is clearly the closest.
+  for (var i = 0; i < rows.length; i++) {
+    if (result.containsKey(i)) continue;
+    var best = 0.0, second = 0.0;
+    Map<String, String>? bs;
+    for (final s in students) {
+      if (taken.contains(s['roll']!)) continue;
+      if (_fatherCompat(s['father'] ?? '', rows[i].father) == false) continue;
+      final sim = _personSim(rows[i].name, s['name'] ?? '');
+      if (sim > best) {
+        second = best;
+        best = sim;
+        bs = s;
+      } else if (sim > second) {
+        second = sim;
+      }
+    }
+    if (bs != null && best >= 0.9 && best - second >= 0.05) take(i, bs);
+  }
   return result;
 }
 
@@ -8354,12 +9372,19 @@ class _ImportReviewScreenState extends State<ImportReviewScreen> {
   @override
   void initState() {
     super.initState();
+    setAppBusy(true);
     _map = autoMatchImportRows(widget.sheet.rows, widget.students);
     _autoRows = _map.keys.toSet();
     _cols = {
       for (final c in widget.sheet.columns)
         if (!_locked(c)) c.col
     };
+  }
+
+  @override
+  void dispose() {
+    setAppBusy(false);
+    super.dispose();
   }
 
   @override
@@ -8454,7 +9479,10 @@ class _ImportReviewScreenState extends State<ImportReviewScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(rows[i].name,
+                    Text(
+                        rows[i].father.isEmpty
+                            ? rows[i].name
+                            : '${rows[i].name}  (S/O ${rows[i].father})',
                         style: const TextStyle(fontWeight: FontWeight.w700)),
                     DropdownButton<String?>(
                       isExpanded: true,
@@ -8468,7 +9496,8 @@ class _ImportReviewScreenState extends State<ImportReviewScreen> {
                             DropdownMenuItem<String?>(
                               value: s['roll'],
                               child: Text(
-                                '${rollOf(s['roll']!)} • ${s['name']}',
+                                '${rollOf(s['roll']!)} • ${s['name']}'
+                                '${(s['father'] ?? '').isEmpty ? '' : ' (S/O ${s['father']})'}',
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
@@ -8618,6 +9647,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
     super.initState();
     selectedDate = widget.initialDate ?? DateTime.now();
     selectedSession = widget.initialSession ?? 1;
+    setAppBusy(true); // web: do not auto-reload for an update while marking
 
     _permSub = permissionsRef().snapshots().listen((s) {
       final p = TeacherPerms.from(s.data());
@@ -8640,6 +9670,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
 
   @override
   void dispose() {
+    setAppBusy(false);
     _permSub?.cancel();
     _ticker?.cancel();
     super.dispose();
@@ -8996,8 +10027,11 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
     // File name: Subject_Section_A_Semester_3_[Class_|Lab_]Full_Report.xlsx
     final base = exportFileBase(widget.sem, widget.semLabel, widget.subjectName);
     final fileName = '${base}_${scopeFileTag(opt.scope)}Full_Report.xlsx';
+    if (!mounted) return;
     if (kIsWeb) {
-      downloadBytes(fileBytes!, fileName);
+      await webShareOrDownload(context, fileBytes!, fileName,
+          text:
+              '${widget.subjectName} • Section ${widget.sem.section} • ${widget.semLabel} Attendance Report');
       return;
     }
     final directory = await getApplicationDocumentsDirectory();
@@ -9340,22 +10374,14 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                                   RollBadge(roll: roll),
                                   const SizedBox(width: 12),
                                   Expanded(
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          student['name']!,
-                                          style: TextStyle(
-                                            fontWeight: FontWeight.w700,
-                                            color: isLow ? kAbsent : null,
-                                          ),
-                                        ),
-                                        if (pct != null)
-                                          Text('${pct.toStringAsFixed(1)}% attendance',
-                                              style: TextStyle(
-                                                  fontSize: 12.5,
-                                                  color: isLow ? kAbsent : kMuted)),
-                                      ],
+                                    child: StudentNameBlock(
+                                      name: student['name']!,
+                                      father: student['father'] ?? '',
+                                      color: isLow ? kAbsent : null,
+                                      extra: pct == null
+                                          ? null
+                                          : '${pct.toStringAsFixed(1)}% attendance',
+                                      extraColor: isLow ? kAbsent : kMuted,
                                     ),
                                   ),
                                   Row(
@@ -9742,6 +10768,7 @@ String prettySession(String id) {
 class StudentStatCard extends StatefulWidget {
   final String roll;
   final String name;
+  final String father;
   final int present;
   final int absent;
   final int total;
@@ -9750,6 +10777,7 @@ class StudentStatCard extends StatefulWidget {
     super.key,
     required this.roll,
     required this.name,
+    this.father = '',
     required this.present,
     required this.absent,
     required this.total,
@@ -9816,6 +10844,14 @@ class _StudentStatCardState extends State<StudentStatCard> {
                     color: good ? null : kAbsent,
                   ),
                 ),
+                if (w.father.trim().isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text('S/O ${w.father.trim()}',
+                      textAlign: TextAlign.center,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: kMuted, fontSize: 12.5)),
+                ],
                 const SizedBox(height: 2),
                 Text('Roll No. ${rollOf(w.roll)}',
                     textAlign: TextAlign.center,
@@ -9919,6 +10955,7 @@ StudentStatCard buildStudentStatCard(
     key: key ?? ValueKey(roll),
     roll: roll,
     name: student['name'] ?? '',
+    father: student['father'] ?? '',
     present: present,
     absent: absent,
     total: records.length,
@@ -10018,10 +11055,13 @@ class AttendanceSheetScreen extends StatefulWidget {
 class _AttendanceSheetScreenState extends State<AttendanceSheetScreen> {
   static const double _rowH = 40;
   static const double _headH = 64;
-  static const double _rollW = 52;
-  static const double _nameW = 150;
-  static const double _cellW = 56;
-  static const double _sumW = 64;
+  // Only Roll + Name stay pinned on the left, so more session columns fit on
+  // a phone. The Father column scrolls sideways with the table.
+  static const double _rollW = 36;
+  double _nameW = 110; // set from the screen width in build()
+  static const double _fatherW = 110;
+  static const double _cellW = 52;
+  static const double _sumW = 56;
 
   bool _loading = true;
   bool _offline = false;
@@ -10186,6 +11226,7 @@ class _AttendanceSheetScreenState extends State<AttendanceSheetScreen> {
   Widget build(BuildContext context) {
     final monthText =
         widget.month == null ? '' : ' - ${DateFormat('MMM yyyy').format(widget.month!)}';
+    _nameW = (MediaQuery.of(context).size.width * 0.30).clamp(96.0, 150.0);
     return Scaffold(
       appBar: AppBar(title: Text('${widget.subjectName}$monthText')),
       body: _loading
@@ -10280,6 +11321,10 @@ class _AttendanceSheetScreenState extends State<AttendanceSheetScreen> {
         ),
       ));
     }
+    headCells.insert(
+        0,
+        _cell('Father', _fatherW,
+            weight: FontWeight.w700, size: 12, h: _headH, bg: headBg));
     headCells.addAll([
       _cell('Total', _sumW,
           weight: FontWeight.w700, size: 12, h: _headH, bg: headBg),
@@ -10296,6 +11341,7 @@ class _AttendanceSheetScreenState extends State<AttendanceSheetScreen> {
       final st = _students[s];
       final roll = st['roll'] ?? '';
       final name = st['name'] ?? '';
+      final father = (st['father'] ?? '').trim();
       final band = s.isOdd ? kGlass : null;
       int present = 0;
       final cells = <Widget>[];
@@ -10311,6 +11357,14 @@ class _AttendanceSheetScreenState extends State<AttendanceSheetScreen> {
         ));
       }
       final pct = n == 0 ? 0.0 : present / n * 100;
+      cells.insert(
+          0,
+          _cell(father, _fatherW,
+              bg: band,
+              color: kMuted,
+              size: 12,
+              align: Alignment.centerLeft,
+              pad: const EdgeInsets.symmetric(horizontal: 8)));
       cells.addAll([
         _cell('$n', _sumW, bg: band),
         _cell('$present', _sumW, bg: band),
@@ -10323,13 +11377,14 @@ class _AttendanceSheetScreenState extends State<AttendanceSheetScreen> {
         _cell(rollOf(roll), _rollW, bg: band, color: kMuted),
         _cell(name, _nameW,
             bg: band,
+            size: 12.5,
             align: Alignment.centerLeft,
-            pad: const EdgeInsets.symmetric(horizontal: 8)),
+            pad: const EdgeInsets.symmetric(horizontal: 6)),
       ]));
       rightRows.add(Row(children: cells));
     }
 
-    final rightWidth = _cellW * n + _sumW * 3;
+    final rightWidth = _fatherW + _cellW * n + _sumW * 3;
 
     return Column(
       children: [
@@ -10546,8 +11601,11 @@ class _MonthlyAttendanceScreenState extends State<MonthlyAttendanceScreen> {
       final monthKey = DateFormat('yyyy-MM').format(_month);
       final fileName =
           '${base}_${monthKey}_${scopeFileTag(opt.scope)}Monthly_Report.xlsx';
+      if (!mounted) return;
       if (kIsWeb) {
-        downloadBytes(bytes, fileName);
+        await webShareOrDownload(context, bytes, fileName,
+            text:
+                '${widget.subjectName} • Section ${widget.sem.section} • ${widget.semLabel} - ${DateFormat('MMMM yyyy').format(_month)} Attendance');
         return;
       }
       final dir = await getApplicationDocumentsDirectory();

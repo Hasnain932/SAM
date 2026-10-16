@@ -39,8 +39,31 @@
   <!-- Our own offline service worker (see sw.js) -->
   <script>
     if ('serviceWorker' in navigator) {
+      // When a new version takes over, reload once so it shows up right away.
+      // If the user is busy (marking attendance / reviewing an import), wait
+      // and reload as soon as they leave that screen.
+      var hadController = !!navigator.serviceWorker.controller;
+      var reloaded = false;
+      var pendingReload = false;
+      var busyCount = 0;
+      function doReload() {
+        if (reloaded) return;
+        reloaded = true;
+        window.location.reload();
+      }
+      window.samSetBusy = function (busy) {
+        busyCount = Math.max(0, busyCount + (busy ? 1 : -1));
+        if (busyCount === 0 && pendingReload) doReload();
+      };
+      navigator.serviceWorker.addEventListener('controllerchange', function () {
+        if (!hadController) return;
+        if (busyCount > 0) { pendingReload = true; return; }
+        doReload();
+      });
       window.addEventListener('load', function () {
-        navigator.serviceWorker.register('sw.js').catch(function () {});
+        navigator.serviceWorker
+          .register('sw.js', { updateViaCache: 'none' })
+          .catch(function () {});
       });
     }
   </script>
