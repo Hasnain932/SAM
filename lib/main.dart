@@ -27,7 +27,7 @@ void main() async {
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: Brightness.light,
     statusBarBrightness: Brightness.dark,
-    systemNavigationBarColor: Color(0xFF0E6275),
+    systemNavigationBarColor: Color(0xFF08203A),
     systemNavigationBarIconBrightness: Brightness.light,
   ));
   // On the web, SQLite runs through the ffi-web factory (IndexedDB based).
@@ -81,25 +81,58 @@ const String kHiddenAdminPassword = 'buddy11';
 
 const String kSoftwareEngineeringDeptId = "Software Engineering";
 
-// Theme: deep navy-to-teal gradient, frosted glass cards, white pill buttons.
-// Green = present, red = absent.
-const Color kBgTop = Color(0xFF2A1B72);
-const Color kBgMid = Color(0xFF0B1545);
-const Color kBgBottom = Color(0xFF0A3B4C);
+// Theme: deep navy gradient, glass cards, blue glow buttons.
+// Blue = present / selected, red = absent.
+const Color kBgTop = Color(0xFF1B1166);
+const Color kBgMid = Color(0xFF0B1240);
+const Color kBgBottom = Color(0xFF08203A);
 const Color kBg = kBgMid;
 const Color kSurface = Color(0xFF111A4A); // solid navy: dialogs, menus
 const Color kSurfaceHi = Color(0xFF1A2560);
 const Color kGlass = Color(0x1AFFFFFF); // glass card fill (10% white)
-const Color kGlassBorder = Color(0x2EFFFFFF); // glass card border (18% white)
+const Color kGlassBorder = Color(0x663B6BF0); // glass card border (soft blue)
+const Color kAccentLine = Color(0xFF3B6BF0); // outline of unselected chips
 const Color kOutline = Color(0x33FFFFFF);
-const Color kAccent = Color(0xFF34F5C5); // light teal: icons, highlights
-const Color kOnAccent = Color(0xFF0B1545); // dark navy: text on white buttons
-const Color kButton = Colors.white; // primary pill buttons
-const Color kPresent = Color(0xFF34F5C5);
-const Color kAccent2 = Color(0xFF22D3EE);
+const Color kAccent = Color(0xFF14B8E6); // cyan blue: icons, highlights
+const Color kOnAccent = Colors.white; // text on blue buttons
+const Color kButton = Color(0xFF2563EB); // primary pill buttons
+const Color kPresent = Color(0xFF14B8E6);
+const Color kAccent2 = Color(0xFF2563EB); // royal blue
 const Color kViolet = Color(0xFF8B7CF6);
 const Color kAbsent = Color(0xFFFF8FA0);
 const Color kMuted = Color(0xFFB4C3DC);
+const Color kAbsent2 = Color(0xFFE5365F);
+const Color kLabelBlue = Color(0xFF8FD8FF); // light blue for labels
+// Soft, light glow (was strong: alpha AA, blur 10). Used on titles and labels.
+const List<Shadow> kGlowText = [Shadow(color: Color(0x2614B8E6), blurRadius: 3)];
+// Names of departments, sections, semesters and subjects: same soft glow.
+const TextStyle kNameStyle = TextStyle(
+    fontSize: 16,
+    fontWeight: FontWeight.w700,
+    color: Color(0xFFEAF6FF),
+    shadows: kGlowText);
+const TextStyle kLabelStyle = TextStyle(
+    color: kLabelBlue, fontSize: 13, fontWeight: FontWeight.w600, shadows: kGlowText);
+const LinearGradient kBlueGrad = LinearGradient(colors: [kAccent, kAccent2]);
+// Diagonal gradient used on icon tiles (same as the department building boxes).
+const LinearGradient kTileGrad = LinearGradient(
+  begin: Alignment.topLeft,
+  end: Alignment.bottomRight,
+  colors: [kAccent, kAccent2],
+);
+const LinearGradient kTileRedGrad = LinearGradient(
+  begin: Alignment.topLeft,
+  end: Alignment.bottomRight,
+  colors: [Color(0xFFFF7A93), kAbsent2],
+);
+const LinearGradient kRedGrad =
+    LinearGradient(colors: [Color(0xFFFF7A93), kAbsent2]);
+// Card fill: soft blue gradient (same family as the P button).
+const LinearGradient kCardGrad = LinearGradient(
+  begin: Alignment.topLeft,
+  end: Alignment.bottomRight,
+  colors: [Color(0xFF1F3C9E), Color(0xFF0C5F95)],
+);
 
 const LinearGradient kAuroraGradient = LinearGradient(
   begin: Alignment.topCenter,
@@ -226,6 +259,7 @@ class AttendanceApp extends StatelessWidget {
             fontSize: 20,
             fontWeight: FontWeight.w700,
             color: Colors.white,
+            shadows: kGlowText,
           ),
         ),
         elevatedButtonTheme: ElevatedButtonThemeData(
@@ -242,7 +276,7 @@ class AttendanceApp extends StatelessWidget {
           style: OutlinedButton.styleFrom(
             foregroundColor: Colors.white,
             backgroundColor: const Color(0x0FFFFFFF),
-            side: const BorderSide(color: Color(0x4DFFFFFF)),
+            side: const BorderSide(color: kAccentLine),
             shape: pillShape,
           ),
         ),
@@ -424,6 +458,8 @@ class AppCard extends StatefulWidget {
   final double radius;
   final double blur;
   final bool float; // soft floating + fade-in; off everywhere except where asked
+  final Color? borderColor; // optional custom border (e.g. low attendance)
+  final bool subtle; // plain dark fill instead of the blue gradient (long lists)
   const AppCard({
     super.key,
     required this.child,
@@ -433,6 +469,8 @@ class AppCard extends StatefulWidget {
     this.radius = 20,
     this.blur = 10,
     this.float = false,
+    this.borderColor,
+    this.subtle = false,
   });
 
   @override
@@ -447,13 +485,13 @@ class _AppCardState extends State<AppCard> {
   Widget build(BuildContext context) {
     final r = BorderRadius.circular(widget.radius);
     final card = Material(
-      color: kGlass,
+      color: widget.subtle ? const Color(0xFF16215F) : kGlass,
       child: InkWell(
         onTap: widget.onTap,
         child: Ink(
           decoration: BoxDecoration(
             borderRadius: r,
-            border: Border.all(color: kGlassBorder),
+            border: Border.all(color: widget.borderColor ?? kGlassBorder),
           ),
           padding: widget.padding,
           child: widget.child,
@@ -487,7 +525,91 @@ class _AppCardState extends State<AppCard> {
   }
 }
 
-// Mint-to-cyan gradient pill button (login screens).
+// Pill button with the blue (or red) gradient. filled = selected look.
+class GradPill extends StatelessWidget {
+  final String label;
+  final IconData? icon;
+  final VoidCallback? onTap;
+  final LinearGradient gradient;
+  final bool filled;
+  final bool enabled;
+  final bool expand;
+  final double? height;
+  final double radius;
+  final double fontSize;
+  const GradPill({
+    super.key,
+    required this.label,
+    required this.onTap,
+    this.icon,
+    this.gradient = kBlueGrad,
+    this.filled = true,
+    this.enabled = true,
+    this.expand = false,
+    this.height,
+    this.radius = 999,
+    this.fontSize = 14,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final red = gradient == kRedGrad;
+    final fg = filled ? Colors.white : (red ? kAbsent : kAccent);
+    final content = Row(
+      mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        if (icon != null) ...[
+          Icon(icon, size: 16, color: fg),
+          const SizedBox(width: 6),
+        ],
+        Flexible(
+          child: Text(label,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  color: fg, fontSize: fontSize, fontWeight: FontWeight.w700)),
+        ),
+      ],
+    );
+    final r = BorderRadius.circular(radius);
+    return Opacity(
+      opacity: enabled ? 1 : 0.55,
+      child: Container(
+        height: height,
+        decoration: BoxDecoration(
+          gradient: filled ? gradient : null,
+          borderRadius: r,
+          border: filled
+              ? null
+              : Border.all(color: red ? kAbsent : kAccentLine, width: 1.2),
+          boxShadow: filled
+              ? [
+                  BoxShadow(
+                    color: gradient.colors.last.withValues(alpha: 0.12),
+                    blurRadius: 6,
+                    offset: const Offset(0, 2),
+                  ),
+                ]
+              : null,
+        ),
+        child: Material(
+          type: MaterialType.transparency,
+          child: InkWell(
+            borderRadius: r,
+            onTap: onTap,
+            child: Padding(
+              padding: EdgeInsets.symmetric(
+                  horizontal: 14, vertical: height == null ? 9 : 0),
+              child: height != null ? Center(child: content) : content,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// Blue gradient pill button (login screens).
 class GradientButton extends StatelessWidget {
   final String label;
   final VoidCallback? onPressed;
@@ -510,9 +632,9 @@ class GradientButton extends StatelessWidget {
           borderRadius: BorderRadius.circular(26),
           boxShadow: [
             BoxShadow(
-              color: kAccent.withValues(alpha: 0.25),
-              blurRadius: 18,
-              offset: const Offset(0, 6),
+              color: kAccent.withValues(alpha: 0.12),
+              blurRadius: 10,
+              offset: const Offset(0, 3),
             ),
           ],
         ),
@@ -717,9 +839,30 @@ class AttendanceChip extends StatelessWidget {
           alignment: Alignment.center,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: selected ? color : Colors.transparent,
+            gradient: selected
+                ? (color == kAbsent
+                    ? kRedGrad
+                    : (color == kPresent ? kBlueGrad : null))
+                : null,
+            color: selected && color != kPresent && color != kAbsent
+                ? color
+                : null,
+            boxShadow: selected
+                ? [
+                    BoxShadow(
+                      color: (color == kAbsent ? kAbsent2 : kAccent2)
+                          .withValues(alpha: 0.14),
+                      blurRadius: 5,
+                      offset: const Offset(0, 2),
+                    ),
+                  ]
+                : null,
             border: Border.all(
-              color: selected ? color : const Color(0x4DFFFFFF),
+              color: selected
+                  ? (color == kAbsent
+                      ? kAbsent2
+                      : (color == kPresent ? kAccent2 : color))
+                  : kAccentLine,
               width: 1.2,
             ),
           ),
@@ -748,30 +891,90 @@ class IconBadge extends StatelessWidget {
   Widget build(BuildContext context) {
     final big = size >= 60;
     final isAccent = color == kAccent;
+    // Flat gradient tile with a white icon (same look as the HF avatar and the
+    // bookmark button), no glow. Other colors (e.g. a taken subject) stay muted.
     return Container(
       width: size,
       height: size,
       decoration: BoxDecoration(
-        gradient: big && isAccent
+        gradient: isAccent
             ? const LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
-                colors: [kAccent, kViolet],
+                colors: [kAccent, kAccent2],
               )
             : null,
-        color: big && isAccent ? null : color.withValues(alpha: 0.14),
+        color: isAccent ? null : color.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(big ? size * 0.3 : 12),
         boxShadow: big && isAccent
             ? [
                 BoxShadow(
-                  color: kViolet.withValues(alpha: 0.35),
-                  blurRadius: 24,
-                  offset: const Offset(0, 8),
+                  color: kAccent2.withValues(alpha: 0.14),
+                  blurRadius: 12,
+                  offset: const Offset(0, 4),
                 ),
               ]
             : null,
       ),
-      child: Icon(icon, color: big && isAccent ? kOnAccent : color, size: size * 0.5),
+      child: Icon(icon,
+          color: isAccent ? kOnAccent : color, size: size * 0.5),
+    );
+  }
+}
+
+// Small blue label chip (used in the permissions dialog).
+class _PermChip extends StatelessWidget {
+  final String text;
+  const _PermChip(this.text);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        color: kAccent.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(7),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(
+            color: kAccent, fontSize: 11, fontWeight: FontWeight.w700),
+      ),
+    );
+  }
+}
+
+// Floating add button: same gradient rounded-square look as the icon tiles.
+class GradFab extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback? onPressed;
+  const GradFab({super.key, this.icon = Icons.add, required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    final r = BorderRadius.circular(18);
+    return Container(
+      width: 58,
+      height: 58,
+      decoration: BoxDecoration(
+        gradient: kTileGrad,
+        borderRadius: r,
+        boxShadow: [
+          BoxShadow(
+            color: kAccent2.withValues(alpha: 0.18),
+            blurRadius: 8,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Material(
+        type: MaterialType.transparency,
+        child: InkWell(
+          borderRadius: r,
+          onTap: onPressed,
+          child: Center(child: Icon(icon, color: Colors.white, size: 28)),
+        ),
+      ),
     );
   }
 }
@@ -871,9 +1074,8 @@ class HeaderTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final fill = color == kAccent
-        ? const Color(0x1AFFFFFF)
-        : color.withValues(alpha: 0.18);
+    final isBlue = color == kAccent;
+    final isRed = color == kAbsent;
     final r = BorderRadius.circular(12);
     return Tooltip(
       message: tooltip,
@@ -886,13 +1088,21 @@ class HeaderTile extends StatelessWidget {
               width: 36,
               height: 36,
               decoration: BoxDecoration(
-                color: tile ? fill : Colors.transparent,
+                gradient: tile && (isBlue || isRed)
+                    ? (isRed ? kTileRedGrad : kTileGrad)
+                    : null,
+                color: tile && !(isBlue || isRed)
+                    ? color.withValues(alpha: 0.18)
+                    : null,
                 borderRadius: r,
               ),
               child: InkWell(
                 borderRadius: r,
                 onTap: onTap,
-                child: Center(child: Icon(icon, color: color, size: 20)),
+                child: Center(
+                    child: Icon(icon,
+                        color: tile && (isBlue || isRed) ? Colors.white : color,
+                        size: 20)),
               ),
             ),
             if (dot)
@@ -952,6 +1162,12 @@ class HeaderCard extends StatelessWidget {
         color: kBgTop,
         borderRadius: BorderRadius.circular(28),
         border: Border.all(color: kGlassBorder),
+        boxShadow: [
+          BoxShadow(
+            color: kAccent2.withValues(alpha: 0.08),
+            blurRadius: 10,
+          ),
+        ],
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -982,7 +1198,8 @@ class HeaderCard extends StatelessWidget {
                         style: const TextStyle(
                           fontSize: 21,
                           fontWeight: FontWeight.w700,
-                          color: Colors.white,
+                          color: Color(0xFFEAF6FF),
+                          shadows: kGlowText,
                         ),
                       ),
                     ),
@@ -993,7 +1210,7 @@ class HeaderCard extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
                           fontSize: 13,
-                          color: kMuted,
+                          color: kLabelBlue,
                           fontWeight: FontWeight.w400,
                         ),
                       ),
@@ -1029,7 +1246,16 @@ class HeaderCard extends StatelessWidget {
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Icon(tabs[i].icon, color: kAccent, size: 22),
+                              Container(
+                                width: 32,
+                                height: 32,
+                                decoration: BoxDecoration(
+                                  gradient: kTileGrad,
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Icon(tabs[i].icon,
+                                    color: Colors.white, size: 19),
+                              ),
                               const SizedBox(height: 4),
                               FittedBox(
                                 fit: BoxFit.scaleDown,
@@ -1037,7 +1263,8 @@ class HeaderCard extends StatelessWidget {
                                   tabs[i].label,
                                   maxLines: 1,
                                   style: const TextStyle(
-                                      fontSize: 12.5, color: kMuted),
+                                      fontSize: 12.5,
+                                      color: kLabelBlue),
                                 ),
                               ),
                             ],
@@ -1054,6 +1281,20 @@ class HeaderCard extends StatelessWidget {
       ),
     );
   }
+}
+
+// Same header bar as the Departments screen, for the inner screens.
+PreferredSizeWidget headerAppBar({
+  required String title,
+  String? subtitle,
+  List<Widget> actions = const [],
+}) {
+  return AppBar(
+    automaticallyImplyLeading: false,
+    titleSpacing: 0,
+    toolbarHeight: subtitle == null ? 84 : 102,
+    title: HeaderCard(title: title, subtitle: subtitle, actions: actions),
+  );
 }
 
 class InfoBanner extends StatelessWidget {
@@ -1529,18 +1770,13 @@ class WelcomeScreen extends StatelessWidget {
                       SizedBox(
                         width: double.infinity,
                         height: 54,
-                        child: ElevatedButton(
-                          onPressed: openAdmin,
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.white,
-                            foregroundColor: kOnAccent,
-                            shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(18)),
-                          ),
-                          child: const Text('Admin Login',
-                              style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w800)),
+                        child: GradPill(
+                          label: 'Admin Login',
+                          onTap: openAdmin,
+                          expand: true,
+                          height: 54,
+                          radius: 18,
+                          fontSize: 16,
                         ),
                       ),
                       const SizedBox(height: 12),
@@ -2216,16 +2452,14 @@ const String kPermMaster = 'teachers_unrestricted';
 const String kPermAnytime = 'perm_anytime'; // mark outside the 20-minute window
 const String kPermChangeTime = 'perm_change_time'; // pick the class time
 const String kPermChangeDate = 'perm_change_date'; // pick other / past dates
-const String kPermEdit = 'perm_edit'; // edit existing records
-const String kPermDelete = 'perm_delete'; // delete records
-const String kPermChangeType = 'perm_change_type'; // convert Class <-> Lab
+// Edit also covers deleting records. Class <-> Lab and Mid <-> Final conversion
+// are always allowed (admin and teachers), so they have no permission.
+const String kPermEdit = 'perm_edit'; // edit AND delete existing records
 const List<String> kDetailedPerms = [
   kPermAnytime,
   kPermChangeTime,
   kPermChangeDate,
   kPermEdit,
-  kPermDelete,
-  kPermChangeType,
 ];
 
 class TeacherPerms {
@@ -2233,17 +2467,13 @@ class TeacherPerms {
   final bool anytime;
   final bool changeTime;
   final bool changeDate;
-  final bool edit;
-  final bool delete;
-  final bool changeType; // may convert a session between Class and Lab
+  final bool edit; // edit and delete existing records
   const TeacherPerms({
     this.master = false,
     this.anytime = false,
     this.changeTime = false,
     this.changeDate = false,
     this.edit = false,
-    this.delete = false,
-    this.changeType = false,
   });
 
   static const TeacherPerms none = TeacherPerms();
@@ -2256,8 +2486,6 @@ class TeacherPerms {
       changeTime: d[kPermChangeTime] == true,
       changeDate: d[kPermChangeDate] == true,
       edit: d[kPermEdit] == true,
-      delete: d[kPermDelete] == true,
-      changeType: d[kPermChangeType] == true,
     );
   }
 
@@ -2268,14 +2496,11 @@ class TeacherPerms {
       other.anytime == anytime &&
       other.changeTime == changeTime &&
       other.changeDate == changeDate &&
-      other.edit == edit &&
-      other.delete == delete &&
-      other.changeType == changeType;
+      other.edit == edit;
 
   @override
   int get hashCode =>
-      Object.hash(
-          master, anytime, changeTime, changeDate, edit, delete, changeType);
+      Object.hash(master, anytime, changeTime, changeDate, edit);
 }
 
 // ---- Old paths (from before sections existed), used only for migration and
@@ -2686,6 +2911,13 @@ class _XlsxBuilder {
   int freezeRows = 7; // rows kept on top while scrolling (header rows)
   int freezeCols = 3; // Roll No, Name, Father Name stay while scrolling sideways
 
+  // Print setup. buildAttendanceExcelBytes decides these automatically.
+  bool portrait = false;
+  bool onePage = true; // true: whole sheet fitted on one page
+  int printScale = 100; // used only when onePage is false
+  final List<int> colBreaks = []; // 0-based columns where a new page starts
+  String printTitles = ''; // rows / columns repeated on every printed page
+
   int _idx(List<String> list, String xml) {
     final i = list.indexOf(xml);
     if (i >= 0) return i;
@@ -2706,6 +2938,7 @@ class _XlsxBuilder {
     bool wrap = false,
     bool border = true,
     bool thick = false,
+    bool shrink = false,
   }) {
     final fontId = _idx(
         _fonts,
@@ -2729,7 +2962,7 @@ class _XlsxBuilder {
         '<xf numFmtId="0" fontId="$fontId" fillId="$fillId" borderId="$borderId" '
         'xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">'
         '<alignment horizontal="${left ? 'left' : 'center'}" vertical="center"'
-        '${wrap ? ' wrapText="1"' : ''}/></xf>');
+        '${wrap ? ' wrapText="1"' : ''}${shrink ? ' shrinkToFit="1"' : ''}/></xf>');
   }
 
   String _esc(String s) => s
@@ -2776,7 +3009,7 @@ class _XlsxBuilder {
     final sb = StringBuffer(
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>'
+        '<sheetPr><pageSetUpPr fitToPage="${onePage ? 1 : 0}"/></sheetPr>'
         '<sheetViews><sheetView showGridLines="0" workbookViewId="0" tabSelected="1">'
         '<pane xSplit="$freezeCols" ySplit="$freezeRows" topLeftCell="${_excelColLetters(freezeCols)}${freezeRows + 1}" activePane="bottomRight" state="frozen"/>'
         '</sheetView></sheetViews>'
@@ -2809,13 +3042,27 @@ class _XlsxBuilder {
       sb.write('<mergeCells count="${merges.length}">'
           '${merges.map((m) => '<mergeCell ref="$m"/>').join()}</mergeCells>');
     }
-    // Print: A4 landscape, whole sheet fitted on ONE page, centered.
+    // Print: A4, centered. Either the whole sheet on ONE page, or several
+    // pages at a fixed readable scale (see the layout decision below).
+    final orient = portrait ? 'portrait' : 'landscape';
     sb.write('<printOptions horizontalCentered="1"/>'
-        '<pageMargins left="0.3" right="0.3" top="0.4" bottom="0.5" '
-        'header="0.3" footer="0.3"/>'
-        '<pageSetup paperSize="9" orientation="landscape" fitToWidth="1" fitToHeight="1"/>'
-        '<headerFooter><oddFooter>&amp;CPage &amp;P of &amp;N</oddFooter></headerFooter>'
-        '</worksheet>');
+        '<pageMargins left="0.25" right="0.25" top="0.4" bottom="0.5" '
+        'header="0.3" footer="0.3"/>');
+    if (onePage) {
+      sb.write('<pageSetup paperSize="9" orientation="$orient" '
+          'fitToWidth="1" fitToHeight="1"/>');
+    } else {
+      sb.write('<pageSetup paperSize="9" scale="$printScale" '
+          'pageOrder="overThenDown" orientation="$orient"/>');
+    }
+    sb.write('<headerFooter><oddFooter>&amp;CPage &amp;P of &amp;N</oddFooter></headerFooter>');
+    if (colBreaks.isNotEmpty) {
+      sb.write('<colBreaks count="${colBreaks.length}" '
+          'manualBreakCount="${colBreaks.length}">'
+          '${colBreaks.map((c) => '<brk id="$c" max="1048575" man="1"/>').join()}'
+          '</colBreaks>');
+    }
+    sb.write('</worksheet>');
 
     final styles = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
@@ -2839,10 +3086,15 @@ class _XlsxBuilder {
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
         '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
         '</Relationships>';
-    const workbook = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    final definedNames = printTitles.isEmpty
+        ? ''
+        : '<definedNames><definedName name="_xlnm.Print_Titles" '
+            'localSheetId="0">$printTitles</definedName></definedNames>';
+    final workbook = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
         '<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>'
+        '$definedNames'
         '<calcPr calcId="191029" fullCalcOnLoad="1"/></workbook>';
     const workbookRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
@@ -2870,15 +3122,32 @@ class _XlsxBuilder {
 class ExportOptions {
   final String scope; // 'all' (Class + Lab Class), kTypeClass or kTypeLab
   final bool useLetters; // true: P / A letters, false: 1 / 0 digits
-  const ExportOptions(this.scope, this.useLetters);
+  final String phase; // 'all' (Overall), kPhaseMid or kPhaseFinal
+  const ExportOptions(this.scope, this.useLetters, [this.phase = 'all']);
 }
 
-// Sessions that belong in the file for the chosen scope.
-List<DateRecord> filterRecordsByScope(List<DateRecord> recs, String scope) {
-  if (scope == kTypeLab) return recs.where((r) => r.isLab).toList();
-  if (scope == kTypeClass) return recs.where((r) => !r.isLab).toList();
-  return List<DateRecord>.from(recs);
+// Sessions that belong in the file for the chosen scope (Class/Lab) and
+// exam phase (Overall / Mid / Final). Both filters combine.
+List<DateRecord> filterRecordsByScope(List<DateRecord> recs, String scope,
+    {String phase = 'all'}) {
+  var out = List<DateRecord>.from(recs);
+  if (phase == kPhaseFinal) out = out.where((r) => r.isFinal).toList();
+  if (phase == kPhaseMid) out = out.where((r) => r.isMid).toList();
+  if (scope == kTypeLab) return out.where((r) => r.isLab).toList();
+  if (scope == kTypeClass) return out.where((r) => !r.isLab).toList();
+  return out;
 }
+
+// Text for "No ... sessions" messages, e.g. "Mid", "Final Lab Class".
+String optionsLabel(ExportOptions o) {
+  final ph = o.phase == 'all' ? '' : phaseLabel(o.phase);
+  final sc = (o.scope == 'all' && o.phase != 'all') ? '' : scopeLabel(o.scope);
+  return [ph, sc].where((e) => e.isNotEmpty).join(' ');
+}
+
+// Part of the file name for the phase ('' for Overall).
+String phaseFileTag(String phase) =>
+    phase == kPhaseFinal ? 'Final_' : (phase == kPhaseMid ? 'Mid_' : '');
 
 String scopeLabel(String scope) => scope == kTypeLab
     ? 'Lab Class'
@@ -2904,13 +3173,15 @@ String exportFileBase(SemRef sem, String semLabel, String subject) {
 }
 
 // One dialog for both exports (overall and monthly): what to include
-// (Class + Lab Class / Class only / Lab Class only) and the P/A format.
+// (Class + Lab Class / Class only / Lab Class only), which exam phase
+// (Overall / Mid / Final) and the P/A format.
 Future<ExportOptions?> askExportOptions(
     BuildContext context, List<DateRecord> recs) {
-  final classCount = recs.where((r) => !r.isLab).length;
-  final labCount = recs.length - classCount;
   var scope = 'all';
+  var phase = 'all';
   var letters = true;
+  final midCount = recs.where((r) => r.isMid).length;
+  final finalCount = recs.length - midCount;
 
   return showDialog<ExportOptions>(
     context: context,
@@ -2931,6 +3202,11 @@ Future<ExportOptions?> askExportOptions(
           );
         }
 
+        // Class / Lab counts follow the chosen phase.
+        final inPhase = filterRecordsByScope(recs, 'all', phase: phase);
+        final classCount = inPhase.where((r) => !r.isLab).length;
+        final labCount = inPhase.length - classCount;
+
         String n(int c) => '$c session${c == 1 ? '' : 's'}';
         return AlertDialog(
           title: const Text('Export Excel'),
@@ -2941,12 +3217,23 @@ Future<ExportOptions?> askExportOptions(
               children: [
                 const Text('Include',
                     style: TextStyle(color: kMuted, fontSize: 12.5)),
-                choice('Class + Lab Class (combined)', n(recs.length),
+                choice('Class + Lab Class (combined)', n(inPhase.length),
                     scope == 'all', () => setS(() => scope = 'all')),
                 choice('Class only', n(classCount), scope == kTypeClass,
                     classCount == 0 ? null : () => setS(() => scope = kTypeClass)),
                 choice('Lab Class only', n(labCount), scope == kTypeLab,
                     labCount == 0 ? null : () => setS(() => scope = kTypeLab)),
+                const Divider(),
+                const Text('Exam phase',
+                    style: TextStyle(color: kMuted, fontSize: 12.5)),
+                choice('Overall (Mid + Final)', n(recs.length), phase == 'all',
+                    () => setS(() => phase = 'all')),
+                choice('Mid', n(midCount), phase == kPhaseMid,
+                    midCount == 0 ? null : () => setS(() => phase = kPhaseMid)),
+                choice('Final', n(finalCount), phase == kPhaseFinal,
+                    finalCount == 0
+                        ? null
+                        : () => setS(() => phase = kPhaseFinal)),
                 const Divider(),
                 const Text('Format',
                     style: TextStyle(color: kMuted, fontSize: 12.5)),
@@ -2963,7 +3250,8 @@ Future<ExportOptions?> askExportOptions(
               child: const Text('Cancel'),
             ),
             TextButton(
-              onPressed: () => Navigator.pop(ctx, ExportOptions(scope, letters)),
+              onPressed: () =>
+                  Navigator.pop(ctx, ExportOptions(scope, letters, phase)),
               child: const Text('Export'),
             ),
           ],
@@ -3013,7 +3301,7 @@ List<int>? buildAttendanceExcelBytes({
   const bandB = 'FFF3F6FB';
   const green = 'FF1B7F3B';
   const red = 'FFD92D20';
-  final titleStyle = x.style(size: 28, font: 'FFFFFFFF', bg: navy, thick: true);
+  final titleStyle = x.style(size: 20, font: 'FFFFFFFF', bg: navy, thick: true);
   final fillerStyle = x.style(border: false);
   final infoLabelStyle =
       x.style(size: 12, font: 'FFFFFFFF', bg: navy, thick: true);
@@ -3021,18 +3309,22 @@ List<int>? buildAttendanceExcelBytes({
   final idHeadStyle =
       x.style(size: 12, font: 'FFFFFFFF', bg: head, wrap: true, thick: true);
   final totalHeadStyle =
-      x.style(size: 11, font: navy, bg: gold, wrap: true, thick: true);
+      x.style(size: 10, font: navy, bg: gold, wrap: true, thick: true);
   final presentHeadStyle = totalHeadStyle;
   final pctHeadStyle = totalHeadStyle;
   final marksHeadStyle = totalHeadStyle;
   // Small "Lab" label above lab session columns.
   final labStyle = x.style(size: 9, font: navy, bg: gold);
 
-  // Normal cells (two alternating row backgrounds).
-  final cellStyle = x.style(size: 11, bg: bandA);
-  final cellStyleAlt = x.style(size: 11, bg: bandB);
-  final nameStyle = x.style(size: 11, left: true, bg: bandA);
-  final nameStyleAlt = x.style(size: 11, left: true, bg: bandB);
+  // Normal cells (two alternating row backgrounds). Bold 12 pt so the
+  // printed text stays easy to read.
+  const int bodySize = 12;
+  final cellStyle = x.style(size: bodySize, bg: bandA);
+  final cellStyleAlt = x.style(size: bodySize, bg: bandB);
+  final nameStyle =
+      x.style(size: bodySize, left: true, bg: bandA, shrink: true);
+  final nameStyleAlt =
+      x.style(size: bodySize, left: true, bg: bandB, shrink: true);
   final totalCellStyle = cellStyle;
   final totalCellStyleAlt = cellStyleAlt;
   final totalPresentStyle = cellStyle;
@@ -3043,10 +3335,10 @@ List<int>? buildAttendanceExcelBytes({
   // Present (P / 1) = green text, Absent (A / 0) = red text. Text colour
   // only, no coloured cell background. Colours are written straight into
   // each cell (no conditional formatting), so WPS / mobile viewers show them.
-  final goodStyle = x.style(size: 11, font: green, bg: bandA);
-  final goodStyleAlt = x.style(size: 11, font: green, bg: bandB);
-  final badStyle = x.style(size: 11, font: red, bg: bandA);
-  final badStyleAlt = x.style(size: 11, font: red, bg: bandB);
+  final goodStyle = x.style(size: bodySize, font: green, bg: bandA);
+  final goodStyleAlt = x.style(size: bodySize, font: green, bg: bandB);
+  final badStyle = x.style(size: bodySize, font: red, bg: bandA);
+  final badStyleAlt = x.style(size: bodySize, font: red, bg: bandB);
 
   // Header styles for weeks / dates / class numbers.
   final weekHeadStyles = [
@@ -3257,26 +3549,106 @@ List<int>? buildAttendanceExcelBytes({
     rowIndex++;
   }
 
-  // ---- Column widths: every session column the same size ----
+  // ---- Column widths: narrow session columns, so text can print bigger ----
   x.colWidths[0] = 8;
-  x.colWidths[1] = (maxName * 1.1 + 4).clamp(22, 40).toDouble();
+  x.colWidths[1] = (maxName * 1.2 + 3).clamp(22, 42).toDouble();
   for (int c = 2; c <= lastCol; c++) {
-    x.colWidths[c] = 9; // all date / info columns equal
+    x.colWidths[c] = 6.5; // all date / info columns equal
   }
-  x.colWidths[2] = (maxFather * 1.1 + 4).clamp(16, 36).toDouble();
-  x.colWidths[totalClassesCol] = 9;
-  x.colWidths[presentCol] = 9;
-  x.colWidths[pctCol] = 12;
-  x.colWidths[marksCol] = 9;
+  x.colWidths[2] = (maxFather * 1.2 + 3).clamp(16, 38).toDouble();
+  x.colWidths[totalClassesCol] = 8;
+  x.colWidths[presentCol] = 8;
+  x.colWidths[pctCol] = 10;
+  x.colWidths[marksCol] = 8;
 
   // ---- Row heights ----
-  x.rowHeights[0] = 42;
+  x.rowHeights[0] = 30;
   for (int r = infoRow0; r < infoRow0 + 3; r++) {
     x.rowHeights[r] = 22;
   }
   x.rowHeights[weekRow] = 26;
-  x.rowHeights[dateRow] = 22;
+  x.rowHeights[dateRow] = 30; // room for "14\nSep" on two lines
   x.rowHeights[serialRow] = 18;
+
+  // ---- Print layout: decided automatically ----
+  // 1) Try the whole sheet on ONE A4 page, portrait and landscape, and keep the
+  //    better one. 2) If the text would be smaller than kMinOnePageScale (too
+  //    small to read), print on SEVERAL portrait pages instead: Roll No / Name /
+  //    Father Name and the header rows repeat on every page, and pages break
+  //    between weeks, so the text stays big and clear.
+  const double kMinOnePageScale = 0.6;
+  const double a4w = 595, a4h = 842; // A4 in points
+  const double marginX = 36, marginY = 65; // left+right, top+bottom
+  // Default font is Arial 11, whose digit is 8 px wide, so a column of width w
+  // is w * 8 px wide (the width value already includes padding).
+  double ptWidth(int c) => x.colWidths[c]! * 8 * 0.75;
+  double sheetW = 0;
+  for (int c = 0; c <= lastCol; c++) {
+    sheetW += ptWidth(c);
+  }
+  double sheetH = 0;
+  for (final h in x.rowHeights.values) {
+    sheetH += h;
+  }
+  double smaller(double a, double b) => a < b ? a : b;
+  final double scalePortrait =
+      smaller((a4w - marginX) / sheetW, (a4h - marginY) / sheetH);
+  final double scaleLandscape =
+      smaller((a4h - marginX) / sheetW, (a4w - marginY) / sheetH);
+
+  if (smaller(1.0, scalePortrait > scaleLandscape ? scalePortrait : scaleLandscape) >=
+      kMinOnePageScale) {
+    x.onePage = true;
+    x.portrait = scalePortrait >= scaleLandscape;
+  } else {
+    x.onePage = false;
+    x.portrait = true;
+    // Scale so all student rows fit one page height (between 60% and 75%).
+    double s = (a4h - marginY) / sheetH * 0.98;
+    if (s > 0.75) s = 0.75;
+    if (s < 0.6) s = 0.6;
+    final int pct = (s * 100).floor();
+    x.printScale = pct;
+
+    final double availW = (a4w - marginX) / (pct / 100) * 0.95;
+    final double fixedW = ptWidth(0) + ptWidth(1) + ptWidth(2);
+    final double colW = ptWidth(firstSessionCol);
+    final double totalsW = ptWidth(totalClassesCol) +
+        ptWidth(presentCol) +
+        ptWidth(pctCol) +
+        ptWidth(marksCol);
+    int perPage = ((availW - fixedW) / colW).floor();
+    int perLast = ((availW - fixedW - totalsW) / colW).floor();
+    if (perPage < 9) perPage = 9; // info block (Program, Course...) stays whole
+    if (perLast < 1) perLast = 1;
+
+    // Page breaks: session columns per page, breaking between weeks.
+    int start = 0;
+    while (n - start > perLast) {
+      int end = n - start <= perPage
+          ? start + (n - start + 1) ~/ 2 // balance the last two pages
+          : start + perPage;
+      final int lowest = start + ((end - start) * 2) ~/ 3;
+      for (int e = end; e > lowest; e--) {
+        if (e < n && weekOf[e] != weekOf[e - 1]) {
+          end = e;
+          break;
+        }
+      }
+      x.colBreaks.add(firstSessionCol + end);
+      start = end;
+    }
+
+    // Repeat Roll No / Name / Father Name and the header rows on every page.
+    x.printTitles =
+        'Sheet1!\$A:\$C,Sheet1!\$${labRow + 1}:\$${serialRow + 1}';
+
+    // The title bar only spans the first page, so its text is not cut.
+    final int titleEnd =
+        x.colBreaks.isEmpty ? lastCol : x.colBreaks.first - 1;
+    x.merges.remove('A1:${_excelColLetters(lastCol)}1');
+    x.merge(0, 0, titleEnd, 0, 'University of Swabi', titleStyle);
+  }
 
   return x.build();
 }
@@ -3427,6 +3799,95 @@ class DateRecord {
 
   // Session type: 'class' or 'lab'. Old records have no _type, so they count as class.
   bool get isLab => meta['_type'] == kTypeLab;
+
+  // Exam phase: 'mid' or 'final'. Old records have no _phase, so they count as Mid.
+  bool get isFinal => meta['_phase'] == kPhaseFinal;
+  bool get isMid => !isFinal;
+}
+
+// Exam phases stored in the '_phase' meta field of an attendance record.
+const String kPhaseMid = 'mid';
+const String kPhaseFinal = 'final';
+String phaseLabel(String phase) => phase == kPhaseFinal ? 'Final' : 'Mid';
+
+// ---- Current exam phase of a subject (Mid / Final button) ----
+// Stored on the subject document (field exam_phase) and also locally, so it
+// works offline and survives app restarts. Missing = Mid.
+String _phasePrefKey(SemRef s, String subject) =>
+    'exam_phase|${s.deptId}|${s.section}|${s.semester}|$subject';
+
+Future<String> readLocalSubjectPhase(SemRef s, String subject) async {
+  try {
+    final p = await SharedPreferences.getInstance();
+    return p.getString(_phasePrefKey(s, subject)) == kPhaseFinal
+        ? kPhaseFinal
+        : kPhaseMid;
+  } catch (_) {
+    return kPhaseMid;
+  }
+}
+
+Future<void> cacheSubjectPhase(SemRef s, String subject, String phase) async {
+  try {
+    final p = await SharedPreferences.getInstance();
+    await p.setString(_phasePrefKey(s, subject), phase);
+  } catch (_) {}
+}
+
+// Server value of the subject phase (null if offline / not set).
+Future<String?> fetchServerSubjectPhase(SemRef s, String subject) async {
+  try {
+    final d =
+        await s.subjectDoc(subject).get().timeout(const Duration(seconds: 4));
+    final v = d.data()?['exam_phase'];
+    if (v == kPhaseFinal || v == kPhaseMid) return v as String;
+  } catch (_) {}
+  return null;
+}
+
+Future<void> saveSubjectPhase(SemRef s, String subject, String phase) async {
+  await cacheSubjectPhase(s, subject, phase);
+  // Not awaited: this never completes while offline.
+  unawaited(s
+      .subjectDoc(subject)
+      .set({'exam_phase': phase}, SetOptions(merge: true))
+      .catchError((_) {}));
+}
+
+// ---- Admin's Mid / Final announcement ----
+// Stored as the field 'announced_phase' of settings/permissions (the document
+// every teacher screen already listens to) and mirrored locally, so the reminder
+// also shows offline and after an app restart. Missing = Mid (nothing announced).
+const String kAnnouncedPhaseField = 'announced_phase';
+const String _kAnnouncedPrefKey = 'announced_exam_phase';
+
+String announcedPhaseFrom(Map<String, dynamic>? d) =>
+    d?[kAnnouncedPhaseField] == kPhaseFinal ? kPhaseFinal : kPhaseMid;
+
+Future<String> readLocalAnnouncedPhase() async {
+  try {
+    final p = await SharedPreferences.getInstance();
+    return p.getString(_kAnnouncedPrefKey) == kPhaseFinal
+        ? kPhaseFinal
+        : kPhaseMid;
+  } catch (_) {
+    return kPhaseMid;
+  }
+}
+
+Future<void> cacheAnnouncedPhase(String phase) async {
+  try {
+    final p = await SharedPreferences.getInstance();
+    await p.setString(_kAnnouncedPrefKey, phase);
+  } catch (_) {}
+}
+
+Future<void> saveAnnouncedPhase(String phase) async {
+  await cacheAnnouncedPhase(phase);
+  // Not awaited: this never completes while offline.
+  unawaited(permissionsRef()
+      .set({kAnnouncedPhaseField: phase}, SetOptions(merge: true))
+      .catchError((_) {}));
 }
 
 // Session types stored in the '_type' meta field of an attendance record.
@@ -4017,35 +4478,56 @@ Future<Map<String, dynamic>> _collectBackup() async {
 Future<void> webShareOrDownload(
     BuildContext context, List<int> bytes, String name,
     {String? text}) async {
-  final r = await shareBytesNow(bytes, name, text: text);
-  if (r == 'unsupported') {
+  // Android Chrome blocks sharing Excel/JSON files, so just download there.
+  // iPhone / iPad keep the share sheet.
+  if (isAndroidBrowser()) {
     downloadBytes(bytes, name);
-  } else if (r == 'expired' && context.mounted) {
-    await showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('File ready'),
-        content: Text(name),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              downloadBytes(bytes, name);
-            },
-            child: const Text('Download'),
-          ),
-          FilledButton(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              final r2 = await shareBytesNow(bytes, name, text: text);
-              if (r2 != 'shared') downloadBytes(bytes, name);
-            },
-            child: const Text('Share'),
-          ),
-        ],
-      ),
-    );
+    if (context.mounted) {
+      showSnack(context, 'File downloaded. Find it in your Downloads folder.');
+    }
+    return;
   }
+  final r = await shareBytesNow(bytes, name, text: text);
+  if (r == 'shared') return;
+  if (r == 'unsupported') {
+    if (context.mounted) {
+      showSnack(context, 'Share not available ($lastShareError). Downloaded instead.');
+    }
+    downloadBytes(bytes, name);
+    return;
+  }
+  if (!context.mounted) return;
+  await showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('File ready'),
+      content: Text(name),
+      actions: [
+        TextButton(
+          onPressed: () {
+            Navigator.pop(ctx);
+            downloadBytes(bytes, name);
+          },
+          child: const Text('Download'),
+        ),
+        FilledButton(
+          onPressed: () async {
+            // Start the share FIRST (inside the tap), then close the dialog.
+            final pending = shareBytesNow(bytes, name, text: text);
+            Navigator.pop(ctx);
+            final r2 = await pending;
+            if (r2 != 'shared') {
+              if (context.mounted) {
+                showSnack(context, 'Could not open share: $lastShareError');
+              }
+              downloadBytes(bytes, name);
+            }
+          },
+          child: const Text('Share'),
+        ),
+      ],
+    ),
+  );
 }
 
 // Creates the backup file and saves/shares it. Returns the number of records.
@@ -4346,7 +4828,7 @@ class LocalDb {
     await db.execute(
         'CREATE TABLE overrides (dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, subject TEXT NOT NULL, roll TEXT NOT NULL, name TEXT, kind TEXT, father TEXT DEFAULT \'\', PRIMARY KEY (dept_id, section, semester, subject, roll))');
     await db.execute(
-        'CREATE TABLE attendance (dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, subject TEXT NOT NULL, session_id TEXT NOT NULL, roll TEXT NOT NULL, status TEXT, marked_time TEXT, marked_by TEXT, marked_by_name TEXT, session_type TEXT, PRIMARY KEY (dept_id, section, semester, subject, session_id, roll))');
+        'CREATE TABLE attendance (dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, subject TEXT NOT NULL, session_id TEXT NOT NULL, roll TEXT NOT NULL, status TEXT, marked_time TEXT, marked_by TEXT, marked_by_name TEXT, session_type TEXT, exam_phase TEXT DEFAULT \'mid\', PRIMARY KEY (dept_id, section, semester, subject, session_id, roll))');
     await db.execute(
         'CREATE TABLE teachers (teacher_id TEXT PRIMARY KEY, name TEXT, username TEXT)');
     await db.execute(
@@ -4358,7 +4840,7 @@ class LocalDb {
     final path = await filePath();
     _db = await sql.openDatabase(
       path,
-      version: 4,
+      version: 5,
       onCreate: (db, version) async => _createAll(db),
       // v1 -> v2: the structure changed. The local DB is only a Firestore copy, so drop
       // the old tables and recreate them; data refills when online.
@@ -4381,6 +4863,11 @@ class LocalDb {
               "ALTER TABLE students ADD COLUMN father TEXT DEFAULT ''");
           await db.execute(
               "ALTER TABLE overrides ADD COLUMN father TEXT DEFAULT ''");
+        }
+        // v4 -> v5: exam phase (Mid / Final) of a session. Old rows count as Mid.
+        if (oldV < 5) {
+          await db.execute(
+              "ALTER TABLE attendance ADD COLUMN exam_phase TEXT DEFAULT 'mid'");
         }
       },
     );
@@ -4562,6 +5049,7 @@ class LocalDb {
     String? markedBy,
     String? markedByName,
     String sessionType = kTypeClass,
+    String phase = kPhaseMid,
   }) {
     return _run((db) async {
       await db.transaction((txn) async {
@@ -4585,6 +5073,7 @@ class LocalDb {
               'marked_by': markedBy ?? '',
               'marked_by_name': markedByName ?? '',
               'session_type': sessionType,
+              'exam_phase': phase,
             },
             conflictAlgorithm: sql.ConflictAlgorithm.replace,
           );
@@ -4602,6 +5091,57 @@ class LocalDb {
           where:
               'dept_id = ? AND section = ? AND semester = ? AND subject = ? AND session_id = ?',
           whereArgs: [s.deptId, s.section, s.semester, subject, sessionId]);
+    });
+  }
+
+  // Changes only the exam phase of one session (Mid <-> Final).
+  static Future<void> setSessionPhase(
+      SemRef s, String subject, String sessionId, String phase) {
+    return _run((db) async {
+      await db.update('attendance', {'exam_phase': phase},
+          where:
+              'dept_id = ? AND section = ? AND semester = ? AND subject = ? AND session_id = ?',
+          whereArgs: [s.deptId, s.section, s.semester, subject, sessionId]);
+    });
+  }
+
+  // Marks one student Present ('P') or Absent ('A') in every saved session of a
+  // subject. A session where the student has no row yet gets one (copying that
+  // session's time / marked-by / type / phase), so the whole past record changes.
+  static Future<void> setStudentStatusAll(
+      SemRef s, String subject, String roll, String status) {
+    return _run((db) async {
+      await db.transaction((txn) async {
+        final rows = await txn.query('attendance',
+            where: '$_semWhere AND subject = ?',
+            whereArgs: [..._semArgs(s), subject]);
+        final sessions = <String, Map<String, Object?>>{};
+        for (final r in rows) {
+          sessions.putIfAbsent((r['session_id'] ?? '').toString(), () => r);
+        }
+        final batch = txn.batch();
+        sessions.forEach((sessionId, r) {
+          batch.insert(
+            'attendance',
+            {
+              'dept_id': s.deptId,
+              'section': s.section,
+              'semester': s.semester,
+              'subject': subject,
+              'session_id': sessionId,
+              'roll': roll,
+              'status': status,
+              'marked_time': r['marked_time'] ?? '',
+              'marked_by': r['marked_by'] ?? '',
+              'marked_by_name': r['marked_by_name'] ?? '',
+              'session_type': r['session_type'] ?? kTypeClass,
+              'exam_phase': r['exam_phase'] ?? kPhaseMid,
+            },
+            conflictAlgorithm: sql.ConflictAlgorithm.replace,
+          );
+        });
+        await batch.commit(noResult: true);
+      });
     });
   }
 
@@ -4802,6 +5342,7 @@ class LocalDb {
             'marked_by': parsed.meta['_marked_by'] ?? '',
             'marked_by_name': parsed.meta['_marked_by_name'] ?? '',
             'session_type': parsed.meta['_type'] ?? kTypeClass,
+            'exam_phase': parsed.meta['_phase'] ?? kPhaseMid,
           });
         });
       }
@@ -4951,6 +5492,8 @@ class LocalDb {
         if (byName.isNotEmpty) rec.meta['_marked_by_name'] = byName;
         rec.meta['_type'] =
             (r['session_type'] ?? '').toString() == kTypeLab ? kTypeLab : kTypeClass;
+        rec.meta['_phase'] =
+            (r['exam_phase'] ?? '').toString() == kPhaseFinal ? kPhaseFinal : kPhaseMid;
       }
       return byId.values.toList();
     } catch (e) {
@@ -5010,6 +5553,7 @@ class LocalDb {
                 'marked_by': parsed.meta['_marked_by'] ?? '',
                 'marked_by_name': parsed.meta['_marked_by_name'] ?? '',
                 'session_type': parsed.meta['_type'] ?? kTypeClass,
+                'exam_phase': parsed.meta['_phase'] ?? kPhaseMid,
               },
               conflictAlgorithm: sql.ConflictAlgorithm.replace,
             );
@@ -5586,13 +6130,13 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
 
   // Master switch: one button that applies to all teachers at once.
   void _showMasterSwitch() {
+    // Class <-> Lab and Mid <-> Final conversion are always allowed, and Edit
+    // also covers Delete, so none of those are listed here.
     final items = <({String key, String label, IconData icon})>[
       (key: kPermAnytime, label: 'TIME', icon: Icons.schedule),
       (key: kPermChangeTime, label: 'SET TIME', icon: Icons.access_time),
       (key: kPermChangeDate, label: 'DATE', icon: Icons.calendar_today),
-      (key: kPermEdit, label: 'EDIT', icon: Icons.edit_outlined),
-      (key: kPermDelete, label: 'DELETE', icon: Icons.delete_outline),
-      (key: kPermChangeType, label: 'CLASS/LAB', icon: Icons.swap_horiz),
+      (key: kPermEdit, label: 'EDIT / DELETE', icon: Icons.edit_outlined),
     ];
 
     void setPerms(Map<String, dynamic> m) {
@@ -5609,112 +6153,281 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
         builder: (ctx, snap) {
           final d = snap.data?.data() ?? <String, dynamic>{};
           final on = d[kPermMaster] == true;
-          return AlertDialog(
-            title: const Text('Teacher permissions'),
-            content: SizedBox(
-              width: double.maxFinite,
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      value: on,
-                      title: Text(on ? 'Master switch: ON' : 'Master switch: OFF'),
-                      subtitle: const Text('ALL',
-                          style: TextStyle(
-                              color: kAccent,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700)),
-                      onChanged: (v) => setPerms({kPermMaster: v}),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      on
-                          ? 'Teachers can mark attendance at any time, add attendance for past dates, edit or delete records, convert Class/Lab sessions, and change the time or session.'
-                          : 'Master switch OFF: turn on the options below one by one to give a teacher only that ability.',
-                      style: const TextStyle(color: kMuted, fontSize: 13),
-                    ),
-                    const Divider(height: 20, color: kOutline),
-                    // Grouped box: visually separates the five individual
-                    // permissions from the master switch above.
-                    Container(
-                      decoration: BoxDecoration(
-                        color: kSurfaceHi,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: kOutline),
+          final announced = announcedPhaseFrom(d);
+          return Dialog(
+            backgroundColor: Colors.transparent,
+            insetPadding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+            child: Container(
+              decoration: BoxDecoration(
+                color: kSurface,
+                borderRadius: BorderRadius.circular(28),
+                border: Border.all(color: kGlassBorder),
+              ),
+              padding: const EdgeInsets.fromLTRB(16, 18, 16, 14),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      const IconBadge(icon: Icons.tune, size: 44),
+                      const SizedBox(width: 12),
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Teacher permissions',
+                              style: TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFFEAF6FF),
+                              ),
+                            ),
+                            SizedBox(height: 2),
+                            Text(
+                              'Choose what teachers can do',
+                              style: TextStyle(color: kLabelBlue, fontSize: 13),
+                            ),
+                          ],
+                        ),
                       ),
-                      padding: const EdgeInsets.symmetric(vertical: 4),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  Flexible(
+                    child: SingleChildScrollView(
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          for (final it in items)
-                            SwitchListTile(
-                              contentPadding:
-                                  const EdgeInsets.symmetric(horizontal: 12),
-                              secondary: Icon(it.icon, color: kAccent),
-                              value: on || d[it.key] == true,
-                              title: Row(
-                                children: [
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 6, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: kAccent.withValues(alpha: 0.15),
-                                      borderRadius: BorderRadius.circular(6),
+                          // Exam phase announcement: Mid / Final
+                          Container(
+                            padding: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              gradient: kCardGrad,
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(color: kGlassBorder),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    const IconBadge(
+                                        icon: Icons.campaign_outlined,
+                                        size: 40),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Row(
+                                            children: [
+                                              Flexible(
+                                                child: Text(
+                                                  'Exam phase: ${phaseLabel(announced)}',
+                                                  style: const TextStyle(
+                                                    color: Color(0xFFEAF6FF),
+                                                    fontSize: 15,
+                                                    fontWeight: FontWeight.w700,
+                                                  ),
+                                                ),
+                                              ),
+                                              const SizedBox(width: 8),
+                                              const _PermChip('MID / FINAL'),
+                                            ],
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            announced == kPhaseFinal
+                                                ? 'Teachers whose subject is still in Mid see a reminder to switch it to Final.'
+                                                : 'Tap Final to remind every teacher to switch their subject from Mid to Final.',
+                                            style: const TextStyle(
+                                                color: kMuted, fontSize: 12.5),
+                                          ),
+                                        ],
+                                      ),
                                     ),
-                                    child: Text(
-                                      it.label,
-                                      style: const TextStyle(
-                                          color: kAccent,
-                                          fontSize: 11,
-                                          fontWeight: FontWeight.w700),
+                                  ],
+                                ),
+                                const SizedBox(height: 10),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: GradPill(
+                                        label: 'Mid',
+                                        expand: true,
+                                        height: 40,
+                                        filled: announced == kPhaseMid,
+                                        onTap: announced == kPhaseMid
+                                            ? null
+                                            : () => saveAnnouncedPhase(kPhaseMid),
+                                      ),
                                     ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: GradPill(
+                                        label: 'Final',
+                                        expand: true,
+                                        height: 40,
+                                        filled: announced == kPhaseFinal,
+                                        onTap: announced == kPhaseFinal
+                                            ? null
+                                            : () => saveAnnouncedPhase(kPhaseFinal),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          // Master switch card
+                          Container(
+                            padding: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              gradient: kCardGrad,
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(color: kGlassBorder),
+                            ),
+                            child: Row(
+                              children: [
+                                const IconBadge(
+                                    icon: Icons.verified_user_outlined,
+                                    size: 40),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Flexible(
+                                            child: Text(
+                                              on
+                                                  ? 'Master switch: ON'
+                                                  : 'Master switch: OFF',
+                                              style: const TextStyle(
+                                                color: Color(0xFFEAF6FF),
+                                                fontSize: 15,
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          const _PermChip('ALL'),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        on
+                                            ? 'Teachers can do everything: mark at any time, pick any date or time, and edit or delete records.'
+                                            : 'Turn on the options below one by one to give teachers only that ability.',
+                                        style: const TextStyle(
+                                            color: kMuted, fontSize: 12.5),
+                                      ),
+                                    ],
                                   ),
-                                ],
+                                ),
+                                const SizedBox(width: 8),
+                                _permSwitch(on, (v) => setPerms({kPermMaster: v})),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          for (final it in items)
+                            Opacity(
+                              opacity: on ? 0.7 : 1,
+                              child: Container(
+                                margin: const EdgeInsets.only(bottom: 8),
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  color: kGlass,
+                                  borderRadius: BorderRadius.circular(18),
+                                  border: Border.all(color: kGlassBorder),
+                                ),
+                                child: Row(
+                                  children: [
+                                    IconBadge(icon: it.icon, size: 40),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          _PermChip(it.label),
+                                          const SizedBox(height: 4),
+                                          Text(
+                                            _permSubtitle(it.key),
+                                            style: const TextStyle(
+                                                color: kMuted, fontSize: 12.5),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    _permSwitch(
+                                      on || d[it.key] == true,
+                                      on ? null : (v) => setPerms({it.key: v}),
+                                    ),
+                                  ],
+                                ),
                               ),
-                              subtitle: Text(
-                                _permSubtitle(it.key),
-                                style:
-                                    const TextStyle(color: kMuted, fontSize: 12),
-                              ),
-                              onChanged: on ? null : (v) => setPerms({it.key: v}),
                             ),
                         ],
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: GradPill(
+                      label: 'Close',
+                      onTap: () => Navigator.pop(dialogContext),
+                    ),
+                  ),
+                ],
               ),
             ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(dialogContext),
-                child: const Text('Close'),
-              ),
-            ],
           );
         },
       ),
     );
   }
 
-  // Short English explanation shown under each permission's code label.
+  // Switch in the app's blue (no outline, white thumb).
+  Widget _permSwitch(bool value, ValueChanged<bool>? onChanged) {
+    return Switch(
+      value: value,
+      onChanged: onChanged,
+      thumbColor: const WidgetStatePropertyAll(Colors.white),
+      trackOutlineColor: const WidgetStatePropertyAll(Colors.transparent),
+      trackColor: WidgetStateProperty.resolveWith((states) {
+        if (states.contains(WidgetState.selected)) {
+          return states.contains(WidgetState.disabled)
+              ? kAccent.withValues(alpha: 0.6)
+              : kAccent;
+        }
+        return const Color(0x33FFFFFF);
+      }),
+    );
+  }
+
+  // Short English explanation shown under each permission's label.
   String _permSubtitle(String key) {
     switch (key) {
       case kPermAnytime:
-        return 'TIME: let the teacher mark attendance any time, not just the first $kMarkWindowMinutes minutes of the hour.';
+        return 'Let the teacher mark attendance any time, not just the first $kMarkWindowMinutes minutes of the hour.';
       case kPermChangeTime:
-        return 'SET TIME: let the teacher pick the class time manually.';
+        return 'Let the teacher pick the class time manually.';
       case kPermChangeDate:
-        return 'DATE: let the teacher choose any date, not just today.';
+        return 'Let the teacher choose any date, not just today.';
       case kPermEdit:
-        return 'EDIT: let the teacher change attendance that is already taken.';
-      case kPermDelete:
-        return 'DELETE: let the teacher delete attendance records.';
-      case kPermChangeType:
-        return 'CLASS/LAB: let the teacher convert a session between Class and Lab Class.';
+        return 'Let the teacher change or delete attendance that is already taken.';
       default:
         return '';
     }
@@ -5768,7 +6481,7 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
             if (_isAdmin && !claim)
               HeaderTile(
                 icon: Icons.tune,
-                tooltip: 'Teacher permissions (master switch)',
+                tooltip: 'Teacher permissions & exam phase',
                 onTap: _showMasterSwitch,
               ),
             if (_isAdmin && !claim) const TeacherRequestsButton(),
@@ -5797,12 +6510,7 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
         ),
       ),
       floatingActionButton: (_isAdmin && !claim)
-          ? FloatingActionButton(
-              onPressed: _showAddDepartmentDialog,
-              backgroundColor: kButton,
-              foregroundColor: kOnAccent,
-              child: const Icon(Icons.add),
-            )
+          ? GradFab(onPressed: _showAddDepartmentDialog)
           : null,
       body: !_seeded
           ? const Center(child: CircularProgressIndicator())
@@ -5854,10 +6562,7 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
                                 const IconBadge(icon: Icons.apartment),
                                 const SizedBox(width: 14),
                                 Expanded(
-                                  child: Text(deptName,
-                                      style: const TextStyle(
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.w700)),
+                                  child: Text(deptName, style: kNameStyle),
                                 ),
                                 if (_isAdmin && !claim) ...[
                                   IconButton(
@@ -5907,7 +6612,7 @@ class SectionsScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(deptName)),
+      appBar: headerAppBar(title: deptName),
       body: ListView(
         padding: const EdgeInsets.only(top: 8, bottom: 24),
         children: [
@@ -5932,20 +6637,22 @@ class SectionsScreen extends StatelessWidget {
                     height: 44,
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
-                      color: kAccent.withValues(alpha: 0.14),
+                      gradient: const LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [kAccent, kAccent2],
+                      ),
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: Text(sec,
                         style: const TextStyle(
-                            color: kAccent,
+                            color: kOnAccent,
                             fontSize: 20,
                             fontWeight: FontWeight.w800)),
                   ),
                   const SizedBox(width: 14),
                   Expanded(
-                    child: Text('Section $sec',
-                        style: const TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.w700)),
+                    child: Text('Section $sec', style: kNameStyle),
                   ),
                   const Icon(Icons.chevron_right, color: kMuted),
                 ],
@@ -6032,7 +6739,7 @@ class SemestersScreen extends StatelessWidget {
         .collection('semesters'));
 
     return Scaffold(
-      appBar: AppBar(title: Text('$deptName • Section $section')),
+      appBar: headerAppBar(title: deptName, subtitle: 'Section $section'),
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: labelsStream,
         builder: (context, snapshot) {
@@ -6070,9 +6777,7 @@ class SemestersScreen extends StatelessWidget {
                         const IconBadge(icon: Icons.event_note_outlined),
                         const SizedBox(width: 14),
                         Expanded(
-                          child: Text(label,
-                              style: const TextStyle(
-                                  fontSize: 16, fontWeight: FontWeight.w700)),
+                          child: Text(label, style: kNameStyle),
                         ),
                         if (AppSession.isAdmin)
                           IconButton(
@@ -6200,14 +6905,14 @@ class SubjectsScreen extends StatelessWidget {
     final myId = AppSession.teacherId;
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text('$semLabel • ${sem.section}'),
+      appBar: headerAppBar(
+        title: '$semLabel • ${sem.section}',
         actions: [
           if (isAdmin)
-            IconButton(
-              icon: const Icon(Icons.groups_outlined),
+            HeaderTile(
+              icon: Icons.groups_outlined,
               tooltip: 'Manage Students',
-              onPressed: () => Navigator.push(
+              onTap: () => Navigator.push(
                 context,
                 MaterialPageRoute(
                   builder: (_) =>
@@ -6218,12 +6923,7 @@ class SubjectsScreen extends StatelessWidget {
         ],
       ),
       floatingActionButton: isAdmin
-          ? FloatingActionButton(
-              onPressed: () => _showAddSubjectDialog(context),
-              backgroundColor: kButton,
-              foregroundColor: kOnAccent,
-              child: const Icon(Icons.add),
-            )
+          ? GradFab(onPressed: () => _showAddSubjectDialog(context))
           : null,
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: liveQuery(sem.subjects.orderBy('name')),
@@ -6283,8 +6983,7 @@ class SubjectsScreen extends StatelessWidget {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(subjectName,
-                              style: const TextStyle(
-                                  fontSize: 15, fontWeight: FontWeight.w700)),
+                              style: kNameStyle.copyWith(fontSize: 15)),
                           if (subtitle != null)
                             Padding(
                               padding: const EdgeInsets.only(top: 3),
@@ -6453,9 +7152,7 @@ class _TeacherHomeScreenState extends State<TeacherHomeScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(subject,
-                        style: const TextStyle(
-                            fontSize: 15, fontWeight: FontWeight.w700)),
+                    Text(subject, style: kNameStyle.copyWith(fontSize: 15)),
                     const SizedBox(height: 3),
                     Wrap(
                       spacing: 6,
@@ -6492,28 +7189,107 @@ class _TeacherHomeScreenState extends State<TeacherHomeScreen> {
     );
   }
 
+  // Header card (avatar, welcome, claim and logout).
+  Widget _page(BuildContext context, int count, Widget list) {
+    final name = AppSession.teacherName.toString();
+    final parts = name.trim().split(RegExp(r'\s+')).where((p) => p.isNotEmpty);
+    final initials =
+        parts.isEmpty ? '?' : parts.take(2).map((p) => p[0].toUpperCase()).join();
+    Widget squareButton(IconData icon, String tip, VoidCallback onTap,
+        {bool filled = false}) {
+      return Tooltip(
+        message: tip,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: onTap,
+          child: Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              gradient: filled
+                  ? const LinearGradient(colors: [kAccent, kAccent2])
+                  : null,
+              borderRadius: BorderRadius.circular(14),
+              border: filled ? null : Border.all(color: kAccentLine),
+            ),
+            child: Icon(icon, color: Colors.white),
+          ),
+        ),
+      );
+    }
+
+    return SafeArea(
+      child: Column(
+        children: [
+          Container(
+            margin: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: kGlass,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: kGlassBorder),
+            ),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 44,
+                      height: 44,
+                      alignment: Alignment.center,
+                      decoration: const BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: LinearGradient(colors: [kAccent, kAccent2]),
+                      ),
+                      child: Text(initials,
+                          style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w800,
+                              color: Colors.white)),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Welcome back',
+                              style: TextStyle(color: kMuted, fontSize: 12.5)),
+                          Text(name,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  fontSize: 19, fontWeight: FontWeight.w800)),
+                        ],
+                      ),
+                    ),
+                    squareButton(
+                      Icons.bookmark_add_outlined,
+                      'Claim Subject',
+                      () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) =>
+                                const DepartmentsScreen(claimMode: true)),
+                      ),
+                      filled: true,
+                    ),
+                    const SizedBox(width: 8),
+                    squareButton(Icons.logout, 'Logout',
+                        () => confirmAndLogout(context)),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          Expanded(child: list),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text('Hello, ${AppSession.teacherName}'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.bookmark_add_outlined),
-            tooltip: 'Claim Subject',
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                  builder: (_) => const DepartmentsScreen(claimMode: true)),
-            ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.logout),
-            tooltip: 'Logout',
-            onPressed: () => confirmAndLogout(context),
-          ),
-        ],
-      ),
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: liveQuery(teacherClaimsRef(AppSession.teacherId)),
         builder: (context, snapshot) {
@@ -6538,11 +7314,11 @@ class _TeacherHomeScreenState extends State<TeacherHomeScreen> {
               future: LocalDb.claimsOf(AppSession.teacherId),
               builder: (context, f) {
                 if (!f.hasData) return const SizedBox.shrink();
-                return _buildList(context, f.data!);
+                return _page(context, f.data!.length, _buildList(context, f.data!));
               },
             );
           }
-          return _buildList(context, items);
+          return _page(context, items.length, _buildList(context, items));
         },
       ),
     );
@@ -7677,26 +8453,25 @@ class ManageStudentsScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text('Students • $semLabel ${sem.section}'),
+      appBar: headerAppBar(
+        title: 'Students',
+        subtitle: '$semLabel • Section ${sem.section}',
         actions: [
-          IconButton(
-            icon: const Icon(Icons.upload_file_outlined),
+          HeaderTile(
+            icon: Icons.upload_file_outlined,
             tooltip: 'Import students (Excel / CSV)',
-            onPressed: () => _importStudents(context),
+            onTap: () => _importStudents(context),
           ),
-          IconButton(
-            icon: const Icon(Icons.copy_all_outlined),
+          HeaderTile(
+            icon: Icons.copy_all_outlined,
             tooltip: 'Copy students to another semester',
-            onPressed: () => _showCopyDialog(context),
+            onTap: () => _showCopyDialog(context),
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton(
+      floatingActionButton: GradFab(
+        icon: Icons.person_add_alt_1,
         onPressed: () => _showStudentDialog(context),
-        backgroundColor: kButton,
-        foregroundColor: kOnAccent,
-        child: const Icon(Icons.person_add_alt_1),
       ),
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: liveQuery(sem.students),
@@ -8128,21 +8903,20 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
   Widget build(BuildContext context) {
     final list = _sortedStudents(_effective, _effectiveFather);
     return Scaffold(
-      appBar: AppBar(
-        title: Text('${widget.subjectName} • Students'),
+      appBar: headerAppBar(
+        title: widget.subjectName,
+        subtitle: 'Students of this subject',
         actions: [
-          IconButton(
-            icon: const Icon(Icons.upload_file_outlined),
+          HeaderTile(
+            icon: Icons.upload_file_outlined,
             tooltip: 'Import students (Excel / CSV)',
-            onPressed: _importStudents,
+            onTap: _importStudents,
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton(
+      floatingActionButton: GradFab(
+        icon: Icons.person_add_alt_1,
         onPressed: _addStudent,
-        backgroundColor: kButton,
-        foregroundColor: kOnAccent,
-        child: const Icon(Icons.person_add_alt_1),
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
@@ -9607,6 +10381,12 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
   String? timeStr; // 'HH:mm'
   Map<String, String> existingMeta = {};
   String sessionType = kTypeClass; // 'class' or 'lab' for the selected session
+  String examPhase = kPhaseMid; // current Mid / Final phase of this subject
+  String sessionPhase = kPhaseMid; // phase the selected session is saved with
+  bool _phaseChangedLocally = false;
+  // What the admin has announced (Mid = nothing to do, Final = switch now).
+  String announcedPhase = kPhaseMid;
+  bool _announceFromServer = false;
 
   // All records of this subject, loaded once and reused for the selected date,
   // copying the previous session and the percentages.
@@ -9626,8 +10406,8 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
   bool get _canChangeTime => _unrestricted || perms.changeTime;
   bool get _canChangeDate => _unrestricted || perms.changeDate;
   bool get _canEditExisting => _unrestricted || perms.edit;
-  bool get _canDeleteRec => _unrestricted || perms.delete;
-  bool get _canChangeType => _unrestricted || perms.changeType;
+  // Edit permission also allows deleting.
+  bool get _canDeleteRec => _unrestricted || perms.edit;
   bool get _isToday {
     final n = DateTime.now();
     return selectedDate.year == n.year &&
@@ -9650,9 +10430,33 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
     setAppBusy(true); // web: do not auto-reload for an update while marking
 
     _permSub = permissionsRef().snapshots().listen((s) {
-      final p = TeacherPerms.from(s.data());
-      if (mounted && p != perms) setState(() => perms = p);
+      final data = s.data();
+      final p = TeacherPerms.from(data);
+      // Trust the announcement when the field is there, or when the server
+      // says it was never set. An empty offline cache must not reset it.
+      String? a;
+      if (data != null && data.containsKey(kAnnouncedPhaseField)) {
+        a = announcedPhaseFrom(data);
+      } else if (!s.metadata.isFromCache) {
+        a = kPhaseMid;
+      }
+      if (a != null) {
+        _announceFromServer = true;
+        if (a != announcedPhase) unawaited(cacheAnnouncedPhase(a));
+      }
+      if (mounted && (p != perms || (a != null && a != announcedPhase))) {
+        setState(() {
+          perms = p;
+          if (a != null) announcedPhase = a;
+        });
+      }
     }, onError: (_) {});
+
+    // Last known announcement, so the reminder also works offline / on restart.
+    unawaited(readLocalAnnouncedPhase().then((v) {
+      if (!mounted || _announceFromServer || v == announcedPhase) return;
+      setState(() => announcedPhase = v);
+    }));
 
     // Update the screen when the window opens or closes
     _lastWindowState = _inWindow;
@@ -9688,6 +10492,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       final recordsF = loadDateRecords(widget.sem, widget.subjectName);
       students = await studentsF;
       _records = await recordsF;
+      examPhase = await readLocalSubjectPhase(widget.sem, widget.subjectName);
       _fetchAttendanceForDate();
       _computePercentages();
     } catch (e) {
@@ -9695,6 +10500,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
     }
     // Always stop the spinner, even if something above failed.
     if (mounted) setState(() => isLoading = false);
+    unawaited(_syncPhaseFromServer());
 
     if (copiedFromPreviousSession && mounted) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -9703,6 +10509,18 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
             'Attendance copied from the previous session. Change if needed and tap Save.');
       });
     }
+  }
+
+  // Picks up a phase change made on another device (offline keeps the local value).
+  Future<void> _syncPhaseFromServer() async {
+    final v = await fetchServerSubjectPhase(widget.sem, widget.subjectName);
+    if (v == null || !mounted || _phaseChangedLocally || v == examPhase) return;
+    await cacheSubjectPhase(widget.sem, widget.subjectName, v);
+    if (!mounted) return;
+    setState(() {
+      examPhase = v;
+      if (!existingRecord) sessionPhase = v;
+    });
   }
 
   DateRecord? _recordById(String id) {
@@ -9718,6 +10536,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
     existingRecord = false;
     existingMeta = {};
     timeStr = null;
+    sessionPhase = examPhase; // new sessions use the subject's current phase
 
     final cur = _recordById(_getDocumentId());
     if (cur != null) {
@@ -9726,6 +10545,8 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       existingMeta = Map<String, String>.from(cur.meta);
       timeStr = cur.meta['_time'];
       sessionType = cur.isLab ? kTypeLab : kTypeClass;
+      // An existing session keeps its own stored phase.
+      sessionPhase = cur.isFinal ? kPhaseFinal : kPhaseMid;
       return;
     }
 
@@ -9834,6 +10655,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
     data['_marked_by'] = byId;
     data['_marked_by_name'] = byName;
     data['_type'] = sessionType; // Class or Lab Class
+    data['_phase'] = sessionPhase; // Mid or Final
 
     final status = <String, String>{
       for (final s in students) s['roll']!: attendanceStatus[s['roll']!] ?? 'P',
@@ -9850,6 +10672,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       markedBy: byId,
       markedByName: byName,
       sessionType: sessionType,
+      phase: sessionPhase,
     ));
 
     final newMeta = <String, String>{
@@ -9857,6 +10680,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       '_marked_by': byId,
       '_marked_by_name': byName,
       '_type': sessionType,
+      '_phase': sessionPhase,
     };
     final rec = DateRecord(docId, Map<String, String>.from(status),
         Map<String, String>.from(newMeta));
@@ -9877,7 +10701,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
 
     if (mounted) {
       showSnack(context,
-          'Attendance Saved/Updated for Session $selectedSession (${typeLabel(sessionType)})!');
+          'Attendance Saved/Updated for Session $selectedSession (${typeLabel(sessionType)}, ${phaseLabel(sessionPhase)})!');
     }
   }
 
@@ -9955,12 +10779,16 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       final byName = AppSession.userName;
       // Lab label in the file wins; otherwise keep the old type (new = Class).
       final type = col.isLab ? kTypeLab : ((old?.isLab ?? false) ? kTypeLab : kTypeClass);
+      // New sessions get the subject's current phase; old ones keep theirs.
+      final phase =
+          old != null ? (old.isFinal ? kPhaseFinal : kPhaseMid) : examPhase;
       final data = <String, dynamic>{
         ...status,
         '_time': ?time,
         '_marked_by': byId,
         '_marked_by_name': byName,
         '_type': type,
+        '_phase': phase,
       };
 
       // Not awaited: this never completes while offline.
@@ -9974,6 +10802,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
         markedBy: byId,
         markedByName: byName,
         sessionType: type,
+        phase: phase,
       );
 
       final newMeta = <String, String>{
@@ -9981,6 +10810,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
         '_marked_by': byId,
         '_marked_by_name': byName,
         '_type': type,
+        '_phase': phase,
       };
       final rec = DateRecord(docId, Map<String, String>.from(status), newMeta);
       final idx = _records.indexWhere((r) => r.id == docId);
@@ -10012,9 +10842,9 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
     if (!mounted) return;
     final opt = await askExportOptions(context, recs);
     if (opt == null || !mounted) return;
-    final picked = filterRecordsByScope(recs, opt.scope);
+    final picked = filterRecordsByScope(recs, opt.scope, phase: opt.phase);
     if (picked.isEmpty) {
-      showSnack(context, 'No ${scopeLabel(opt.scope)} sessions to export.',
+      showSnack(context, 'No ${optionsLabel(opt)} sessions to export.',
           color: kAbsent);
       return;
     }
@@ -10024,9 +10854,10 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       students: students,
       useLetters: opt.useLetters,
     );
-    // File name: Subject_Section_A_Semester_3_[Class_|Lab_]Full_Report.xlsx
+    // File name: Subject_Section_A_Semester_3_[Mid_|Final_][Class_|Lab_]Full_Report.xlsx
     final base = exportFileBase(widget.sem, widget.semLabel, widget.subjectName);
-    final fileName = '${base}_${scopeFileTag(opt.scope)}Full_Report.xlsx';
+    final fileName =
+        '${base}_${phaseFileTag(opt.phase)}${scopeFileTag(opt.scope)}Full_Report.xlsx';
     if (!mounted) return;
     if (kIsWeb) {
       await webShareOrDownload(context, fileBytes!, fileName,
@@ -10051,19 +10882,101 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
   // Class / Lab Class button (same look as the Mark all buttons).
   Widget _typeButton(String label, String type, bool enabled) {
     final selected = sessionType == type;
-    return OutlinedButton(
-      onPressed: enabled ? () => setState(() => sessionType = type) : null,
-      style: OutlinedButton.styleFrom(
-        foregroundColor: selected ? kOnAccent : kAccent,
-        backgroundColor: selected ? kAccent : null,
-        disabledForegroundColor: selected ? kOnAccent : kMuted,
-        disabledBackgroundColor:
-            selected ? kAccent.withValues(alpha: 0.45) : null,
-        side: BorderSide(color: enabled ? kAccent : kOutline),
-        visualDensity: VisualDensity.compact,
-        padding: const EdgeInsets.symmetric(horizontal: 12),
+    return GradPill(
+      label: label,
+      filled: selected,
+      enabled: enabled,
+      onTap: enabled ? () => setState(() => sessionType = type) : null,
+    );
+  }
+
+  // Mid / Final button (same look as the Class / Lab buttons).
+  Widget _phaseButton(String label, String phase, bool enabled) {
+    final selected = examPhase == phase;
+    return GradPill(
+      label: label,
+      filled: selected,
+      enabled: enabled,
+      onTap: (enabled && !selected) ? () => _confirmSwitchPhase(phase) : null,
+    );
+  }
+
+  // Asks before switching the subject between Mid and Final (both directions).
+  Future<void> _confirmSwitchPhase(String newPhase) async {
+    final name = phaseLabel(newPhase);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Switch to $name?'),
+        content: Text(
+            'New attendance for this subject will be saved as $name. Old attendance is not changed.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Confirm'),
+          ),
+        ],
       ),
-      child: Text(label),
+    );
+    if (ok != true || !mounted) return;
+    _phaseChangedLocally = true;
+    setState(() {
+      examPhase = newPhase;
+      if (!existingRecord) sessionPhase = newPhase;
+    });
+    await saveSubjectPhase(widget.sem, widget.subjectName, newPhase);
+    if (mounted) showSnack(context, 'Subject is now in $name phase.');
+  }
+
+  // Teachers only: the admin announced the Final phase but this subject is still
+  // in Mid. Shows every time the subject is opened until the teacher switches it
+  // to Final (or the admin announces Mid again).
+  Widget _finalReminderBanner() {
+    if (_isAdmin || announcedPhase != kPhaseFinal || examPhase != kPhaseMid) {
+      return const SizedBox.shrink();
+    }
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: kViolet.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: kViolet.withValues(alpha: 0.5)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.campaign_outlined, color: kViolet, size: 20),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'The Mid phase has ended and the Final phase has started. '
+                  'Please switch this subject from Mid to Final.',
+                  style: TextStyle(fontSize: 13),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerRight,
+            child: GradPill(
+              label: 'Switch to Final',
+              icon: Icons.emoji_events_outlined,
+              height: 36,
+              enabled: _canEdit,
+              onTap: _canEdit ? () => _confirmSwitchPhase(kPhaseFinal) : null,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -10149,8 +11062,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                 );
               },
             ),
-            if (_canEditExisting || _canDeleteRec || _canChangeType)
-              HeaderAction(
+            HeaderAction(
                 icon: Icons.edit_calendar_outlined,
                 label: 'Records',
                 onTap: () {
@@ -10188,19 +11100,18 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
                   child: SizedBox(
                     width: double.infinity,
-                    child: OutlinedButton.icon(
-                      onPressed: _openMonthly,
-                      icon: const Icon(Icons.calendar_month_outlined, size: 18),
-                      label: const Text('Monthly attendance'),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: kAccent,
-                        side: const BorderSide(color: kOutline),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12)),
-                      ),
+                    child: GradPill(
+                      onTap: _openMonthly,
+                      icon: Icons.calendar_month_outlined,
+                      label: 'Monthly attendance',
+                      filled: false,
+                      expand: true,
+                      height: 46,
+                      radius: 14,
                     ),
                   ),
                 ),
+                _finalReminderBanner(),
                 _restrictionBanner(),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
@@ -10211,11 +11122,11 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                         children: [
                           Text(
                             "Date: ${DateFormat('dd MMM yyyy').format(selectedDate)}",
-                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                            style: kLabelStyle.copyWith(fontSize: 16),
                           ),
                           if (_canChangeDate)
-                            ElevatedButton.icon(
-                              onPressed: () async {
+                            GradPill(
+                              onTap: () async {
                                 DateTime? picked = await showDatePicker(
                                   context: context,
                                   initialDate: selectedDate,
@@ -10227,8 +11138,8 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                                   await _afterDateOrSessionChange();
                                 }
                               },
-                              icon: const Icon(Icons.calendar_today, size: 16),
-                              label: const Text('Change Date'),
+                              icon: Icons.calendar_today,
+                              label: 'Change Date',
                             ),
                         ],
                       ),
@@ -10239,18 +11150,18 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                           children: [
                             Text(
                               "Time: ${timeStr == null ? '—' : fmtHhmm(timeStr)}",
-                              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
+                              style: kLabelStyle.copyWith(fontSize: 16),
                             ),
-                            OutlinedButton.icon(
-                              onPressed: () async {
+                            GradPill(
+                              onTap: () async {
                                 final picked =
                                     await pickClassTime(context, parseHhmm(timeStr));
                                 if (picked != null) {
                                   setState(() => timeStr = hhmm(picked));
                                 }
                               },
-                              icon: const Icon(Icons.access_time, size: 16),
-                              label: const Text('Change Time'),
+                              icon: Icons.access_time,
+                              label: 'Change Time',
                             ),
                           ],
                         ),
@@ -10259,12 +11170,15 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          const Text(
+                          Text(
                             "Lecture / Session:",
-                            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
+                            style: kLabelStyle.copyWith(fontSize: 15),
                           ),
                           DropdownButton<int>(
                             value: selectedSession,
+                            style: kLabelStyle.copyWith(fontSize: 16),
+                            iconEnabledColor: kAccent,
+                            dropdownColor: kSurface,
                             items: List.generate(5, (index) => index + 1)
                                 .map((val) => DropdownMenuItem(
                                       value: val,
@@ -10291,8 +11205,25 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                       children: [
                         const SizedBox(
                           width: 52,
+                          child: Text('Exam:',
+                              style: kLabelStyle),
+                        ),
+                        const SizedBox(width: 10),
+                        _phaseButton('Mid', kPhaseMid, canEdit),
+                        const SizedBox(width: 8),
+                        _phaseButton('Final', kPhaseFinal, canEdit),
+                      ],
+                    ),
+                  ),
+                if (students.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+                    child: Row(
+                      children: [
+                        const SizedBox(
+                          width: 52,
                           child: Text('Type:',
-                              style: TextStyle(color: kMuted, fontSize: 13)),
+                              style: kLabelStyle),
                         ),
                         const SizedBox(width: 10),
                         _typeButton('Class', kTypeClass, canEdit),
@@ -10302,47 +11233,70 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                     ),
                   ),
                 if (students.isNotEmpty)
+                  Builder(builder: (context) {
+                    var absentCount = 0;
+                    for (final st in students) {
+                      if ((attendanceStatus[st['roll']!] ?? 'P') == 'A') {
+                        absentCount++;
+                      }
+                    }
+                    final presentCount = students.length - absentCount;
+                    return Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 10, 16, 0),
+                      child: Row(
+                        children: [
+                          Text('Present $presentCount',
+                              style: const TextStyle(
+                                  color: kAccent,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700)),
+                          const SizedBox(width: 14),
+                          Text('Absent $absentCount',
+                              style: const TextStyle(
+                                  color: kAbsent,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700)),
+                          const SizedBox(width: 14),
+                          Text('Total ${students.length}',
+                              style: const TextStyle(
+                                  color: kMuted,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600)),
+                        ],
+                      ),
+                    );
+                  }),
+                if (students.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
                     child: Row(
                       children: [
                         const Text('Mark all:',
-                            style: TextStyle(color: kMuted, fontSize: 13)),
+                            style: kLabelStyle),
                         const SizedBox(width: 10),
-                        OutlinedButton(
-                          onPressed: canEdit
-                              ? () => setState(() {
-                                    for (final st in students) {
-                                      attendanceStatus[st['roll']!] = 'A';
-                                    }
-                                  })
-                              : null,
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: kAbsent,
-                            side: BorderSide(
-                                color: canEdit ? kAbsent : kOutline),
-                            visualDensity: VisualDensity.compact,
-                            padding: const EdgeInsets.symmetric(horizontal: 12),
-                          ),
-                          child: const Text('All Absent'),
-                        ),
-                        const SizedBox(width: 8),
-                        OutlinedButton(
-                          onPressed: canEdit
+                        GradPill(
+                          label: 'All Present',
+                          enabled: canEdit,
+                          onTap: canEdit
                               ? () => setState(() {
                                     for (final st in students) {
                                       attendanceStatus[st['roll']!] = 'P';
                                     }
                                   })
                               : null,
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: kPresent,
-                            side: BorderSide(
-                                color: canEdit ? kPresent : kOutline),
-                            visualDensity: VisualDensity.compact,
-                            padding: const EdgeInsets.symmetric(horizontal: 12),
-                          ),
-                          child: const Text('All Present'),
+                        ),
+                        const SizedBox(width: 8),
+                        GradPill(
+                          label: 'All Absent',
+                          gradient: kRedGrad,
+                          enabled: canEdit,
+                          onTap: canEdit
+                              ? () => setState(() {
+                                    for (final st in students) {
+                                      attendanceStatus[st['roll']!] = 'A';
+                                    }
+                                  })
+                              : null,
                         ),
                       ],
                     ),
@@ -10367,6 +11321,8 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                             return RepaintBoundary(
                                 child: AppCard(
  float: false,
+                              subtle: true,
+                              borderColor: isLow ? kAbsent : null,
                               margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                               padding: const EdgeInsets.fromLTRB(12, 9, 10, 9),
                               child: Row(
@@ -10374,14 +11330,34 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                                   RollBadge(roll: roll),
                                   const SizedBox(width: 12),
                                   Expanded(
-                                    child: StudentNameBlock(
-                                      name: student['name']!,
-                                      father: student['father'] ?? '',
-                                      color: isLow ? kAbsent : null,
-                                      extra: pct == null
-                                          ? null
-                                          : '${pct.toStringAsFixed(1)}% attendance',
-                                      extraColor: isLow ? kAbsent : kMuted,
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        StudentNameBlock(
+                                          name: student['name']!,
+                                          father: student['father'] ?? '',
+                                          color: isLow ? kAbsent : null,
+                                          extra: pct == null
+                                              ? null
+                                              : '${pct.toStringAsFixed(1)}% attendance',
+                                          extraColor: isLow ? kAbsent : kMuted,
+                                        ),
+                                        if (pct != null) ...[
+                                          const SizedBox(height: 6),
+                                          ClipRRect(
+                                            borderRadius:
+                                                BorderRadius.circular(4),
+                                            child: LinearProgressIndicator(
+                                              value: (pct / 100).clamp(0.0, 1.0),
+                                              minHeight: 4,
+                                              backgroundColor:
+                                                  const Color(0xFF22308A),
+                                              color: isLow ? kAbsent : kAccent,
+                                            ),
+                                          ),
+                                        ],
+                                      ],
                                     ),
                                   ),
                                   Row(
@@ -10426,11 +11402,11 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                         Expanded(
                           flex: 1,
                           child: SizedBox(
-                            height: 50,
+                            height: 54,
                             child: ElevatedButton(
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: kAbsent,
-                                foregroundColor: kOnAccent,
+                                foregroundColor: const Color(0xFF2A0A12),
                               ),
                               onPressed: () {
                                 showDialog(
@@ -10462,13 +11438,35 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                       ],
                       Expanded(
                         flex: 3,
-                        child: SizedBox(
-                          height: 50,
-                          child: ElevatedButton(
-                            onPressed: canEdit ? _saveAttendance : null,
-                            child: Text(
-                              existingRecord ? 'Save / Update' : 'Save Attendance',
-                              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                        child: Opacity(
+                          opacity: canEdit ? 1 : 0.5,
+                          child: Container(
+                            height: 54,
+                            decoration: BoxDecoration(
+                              gradient: const LinearGradient(
+                                  colors: [kAccent, kAccent2]),
+                              borderRadius: BorderRadius.circular(27),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: kAccent2.withValues(alpha: 0.16),
+                                  blurRadius: 10,
+                                  offset: const Offset(0, 3),
+                                ),
+                              ],
+                            ),
+                            child: ElevatedButton(
+                              onPressed: canEdit ? _saveAttendance : null,
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.transparent,
+                                disabledBackgroundColor: Colors.transparent,
+                                shadowColor: Colors.transparent,
+                                foregroundColor: Colors.white,
+                                disabledForegroundColor: Colors.white,
+                              ),
+                              child: Text(
+                                existingRecord ? 'Save / Update' : 'Save Attendance',
+                                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                              ),
                             ),
                           ),
                         ),
@@ -10554,6 +11552,214 @@ class ManageAttendanceScreen extends StatelessWidget {
     );
   }
 
+  // Moves one session between Mid and Final (single toggle).
+  void _confirmChangePhase(
+      BuildContext context, String docId, String label, String newPhase) {
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Change exam phase?'),
+        content: Text('Change phase of $label to ${phaseLabel(newPhase)}?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () async {
+              Navigator.pop(dialogContext);
+              // Not awaited: this never completes while offline.
+              unawaited(sem
+                  .dates(subjectName)
+                  .doc(docId)
+                  .update({'_phase': newPhase}).catchError((_) {}));
+              unawaited(LocalDb.setSessionPhase(sem, subjectName, docId, newPhase));
+              if (context.mounted) {
+                showSnack(context, '$label is now ${phaseLabel(newPhase)}');
+              }
+            },
+            child: const Text('Change'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Marks one student Present or Absent in every saved session of this subject.
+  // Returns how many sessions were changed.
+  Future<int> _markStudentEverywhere(String roll, String status) async {
+    final records = await loadDateRecords(sem, subjectName);
+    for (final r in records) {
+      // Not awaited: this never completes while offline. merge keeps the
+      // other students and the session's meta fields untouched.
+      unawaited(sem
+          .dates(subjectName)
+          .doc(r.id)
+          .set({roll: status}, SetOptions(merge: true)).catchError((_) {}));
+    }
+    unawaited(LocalDb.setStudentStatusAll(sem, subjectName, roll, status));
+    return records.length;
+  }
+
+  Widget _bulkMarkButton(String text, Color color, VoidCallback onTap) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: onTap,
+      child: Container(
+        width: 44,
+        height: 38,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: color.withValues(alpha: 0.6)),
+        ),
+        child: Text(text,
+            style: TextStyle(
+                color: color, fontWeight: FontWeight.w800, fontSize: 15)),
+      ),
+    );
+  }
+
+  Future<void> _confirmBulkMark(BuildContext context, BuildContext sheetContext,
+      Map<String, String> student, String status) async {
+    final roll = student['roll'] ?? '';
+    final name = student['name'] ?? '';
+    final word = status == 'P' ? 'Present' : 'Absent';
+    final ok = await showDialog<bool>(
+      context: sheetContext,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Mark all $word?'),
+        content: Text(
+            'Mark $name (Roll $roll) as $word in ALL past attendance records '
+            'of $subjectName? This overwrites their existing marks.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: Text(word,
+                style: TextStyle(
+                    color: status == 'P' ? kPresent : kAbsent)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final n = await _markStudentEverywhere(roll, status);
+    if (sheetContext.mounted) Navigator.pop(sheetContext);
+    if (context.mounted) {
+      showSnack(context,
+          '$name marked $word in $n record${n == 1 ? '' : 's'}.');
+    }
+  }
+
+  // Bottom sheet: pick a student, then tap P or A to mark them in every record.
+  Future<void> _openStudentBulkSheet(BuildContext context) async {
+    final students = await loadSubjectStudents(sem, subjectName);
+    if (!context.mounted) return;
+    if (students.isEmpty) {
+      showSnack(context, 'No students found in this subject.', color: kAbsent);
+      return;
+    }
+    String query = '';
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: kSurface,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (sheetContext, setSheetState) {
+          final q = query.trim().toLowerCase();
+          final list = q.isEmpty
+              ? students
+              : students
+                  .where((s) =>
+                      (s['name'] ?? '').toLowerCase().contains(q) ||
+                      (s['roll'] ?? '').toLowerCase().contains(q))
+                  .toList();
+          return SafeArea(
+            child: Padding(
+              padding: EdgeInsets.only(
+                  bottom: MediaQuery.of(sheetContext).viewInsets.bottom),
+              child: SizedBox(
+                height: MediaQuery.of(sheetContext).size.height * 0.75,
+                child: Column(
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(20, 18, 20, 4),
+                      child: Text(
+                        'Mark a student in all past records',
+                        style: TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                    const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 20),
+                      child: Text(
+                        'Tap P (Present) or A (Absent) next to a student.',
+                        style: TextStyle(color: kMuted, fontSize: 12.5),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+                      child: TextField(
+                        onChanged: (v) => setSheetState(() => query = v),
+                        decoration: const InputDecoration(
+                          hintText: 'Search name or roll number',
+                          prefixIcon: Icon(Icons.search),
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: list.isEmpty
+                          ? const Center(
+                              child: Text('No student matches.',
+                                  style: TextStyle(color: kMuted)))
+                          : ListView.builder(
+                              itemCount: list.length,
+                              itemBuilder: (_, i) {
+                                final s = list[i];
+                                return ListTile(
+                                  title: Text(s['name'] ?? '',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis),
+                                  subtitle: Text('Roll: ${s['roll'] ?? ''}',
+                                      style: const TextStyle(
+                                          color: kMuted, fontSize: 12)),
+                                  trailing: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      _bulkMarkButton(
+                                          'P',
+                                          kPresent,
+                                          () => _confirmBulkMark(context,
+                                              sheetContext, s, 'P')),
+                                      const SizedBox(width: 8),
+                                      _bulkMarkButton(
+                                          'A',
+                                          kAbsent,
+                                          () => _confirmBulkMark(context,
+                                              sheetContext, s, 'A')),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
@@ -10561,16 +11767,26 @@ class ManageAttendanceScreen extends StatelessWidget {
       builder: (context, permSnap) {
         final perms = TeacherPerms.from(permSnap.data?.data());
         final full = AppSession.isAdmin || perms.master;
-        return _buildRecords(context, full || perms.edit, full || perms.delete,
-            full || perms.changeType);
+        return _buildRecords(
+            context, full || perms.edit, full || perms.edit, true, true);
       },
     );
   }
 
   Widget _buildRecords(BuildContext context, bool canEdit, bool canDelete,
-      bool canChangeType) {
+      bool canChangeType, bool canChangePhase) {
     return Scaffold(
-      appBar: AppBar(title: Text('$subjectName - Records')),
+      appBar: AppBar(
+        title: Text('$subjectName - Records'),
+        actions: [
+          if (canEdit)
+            IconButton(
+              icon: const Icon(Icons.how_to_reg_outlined),
+              tooltip: 'Mark a student in all records',
+              onPressed: () => _openStudentBulkSheet(context),
+            ),
+        ],
+      ),
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: liveQuery(sem.dates(subjectName)),
         builder: (context, snapshot) {
@@ -10621,11 +11837,15 @@ class ManageAttendanceScreen extends StatelessWidget {
               final time = fmtHhmm(parsed.meta['_time']);
               final by = parsed.meta['_marked_by_name'] ?? '';
               final isLab = parsed.meta['_type'] == kTypeLab;
+              final isFinal = parsed.meta['_phase'] == kPhaseFinal;
 
               return AppCard(
                 margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
-                padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
-                child: Row(
+                padding: const EdgeInsets.fromLTRB(14, 10, 8, 6),
+                child: Column(
+                  children: [
+                  Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const IconBadge(icon: Icons.event_note, size: 40),
                     const SizedBox(width: 12),
@@ -10633,13 +11853,15 @@ class ManageAttendanceScreen extends StatelessWidget {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Row(
+                          Wrap(
+                            spacing: 6,
+                            runSpacing: 4,
+                            crossAxisAlignment: WrapCrossAlignment.center,
                             children: [
-                              Expanded(
-                                child: Text(dateText,
-                                    style: const TextStyle(
-                                        fontWeight: FontWeight.w700)),
-                              ),
+                              Text(dateText,
+                                  softWrap: false,
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.w700)),
                               // Session number badge, next to the date.
                               if (parsedSession != null) ...[
                                 Container(
@@ -10656,7 +11878,6 @@ class ManageAttendanceScreen extends StatelessWidget {
                                         fontWeight: FontWeight.w700),
                                   ),
                                 ),
-                                const SizedBox(width: 6),
                               ],
                               // Session type chip: quick visual cue for Class vs Lab.
                               Container(
@@ -10678,9 +11899,29 @@ class ManageAttendanceScreen extends StatelessWidget {
                                       fontWeight: FontWeight.w700),
                                 ),
                               ),
+                              // Exam phase chip: Mid or Final.
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 7, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: (isFinal ? kAccent2 : kMuted)
+                                      .withValues(alpha: 0.18),
+                                  borderRadius: BorderRadius.circular(6),
+                                  border: Border.all(
+                                      color: (isFinal ? kAccent2 : kMuted)
+                                          .withValues(alpha: 0.5)),
+                                ),
+                                child: Text(
+                                  phaseLabel(isFinal ? kPhaseFinal : kPhaseMid),
+                                  style: TextStyle(
+                                      color: isFinal ? kAccent2 : kMuted,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w700),
+                                ),
+                              ),
                             ],
                           ),
-                          const SizedBox(height: 2),
+                          const SizedBox(height: 4),
                           Text(
                             'Present: $presentCount | Absent: $absentCount'
                             '${time.isEmpty ? '' : ' | $time'}'
@@ -10690,13 +11931,36 @@ class ManageAttendanceScreen extends StatelessWidget {
                         ],
                       ),
                     ),
+                  ],
+                  ),
+                  const SizedBox(height: 4),
+                  // Action buttons on their own row so the text gets full width.
+                  Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
                     if (canChangeType)
                     IconButton(
-                      icon: const Icon(Icons.swap_horiz, color: kAccent),
+                      // Shows what it will become: flask = Lab, class = Class.
+                      icon: Icon(
+                          isLab ? Icons.class_outlined : Icons.science_outlined,
+                          color: kAccent),
                       tooltip:
                           isLab ? 'Change to Class' : 'Change to Lab Class',
                       onPressed: () => _confirmChangeType(context, docId, label,
                           isLab ? kTypeClass : kTypeLab),
+                    ),
+                    if (canChangePhase)
+                    IconButton(
+                      // Shows what it will become: trophy = Final, hourglass = Mid.
+                      // Violet so it never looks like the Class / Lab button.
+                      icon: Icon(
+                          isFinal
+                              ? Icons.hourglass_top_rounded
+                              : Icons.emoji_events_outlined,
+                          color: kViolet),
+                      tooltip: isFinal ? 'Change to Mid' : 'Change to Final',
+                      onPressed: () => _confirmChangePhase(context, docId, label,
+                          isFinal ? kPhaseMid : kPhaseFinal),
                     ),
                     if (canEdit)
                     IconButton(
@@ -10735,6 +11999,8 @@ class ManageAttendanceScreen extends StatelessWidget {
                         onPressed: () => _confirmDelete(context, docId, label),
                       ),
                     ),
+                  ],
+                  ),
                   ],
                 ),
               );
@@ -10793,7 +12059,14 @@ class _StudentStatCardState extends State<StudentStatCard> {
 
   Widget _stat(String value, String label, Color color) {
     return Expanded(
-      child: Column(
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 4),
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.14),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(value,
@@ -10805,6 +12078,7 @@ class _StudentStatCardState extends State<StudentStatCard> {
               textAlign: TextAlign.center,
               style: const TextStyle(color: kMuted, fontSize: 11.5)),
         ],
+      ),
       ),
     );
   }
@@ -10818,15 +12092,18 @@ class _StudentStatCardState extends State<StudentStatCard> {
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+      // Glass card (same look as the Records / list cards): soft translucent
+      // fill + thin border, no strong gradient and no glow.
       decoration: BoxDecoration(
-        color: kGlass,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: kGlassBorder),
+        color: good ? kGlass : kAbsent.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(
+            color: good ? kGlassBorder : kAbsent.withValues(alpha: 0.5)),
       ),
       child: Material(
         color: Colors.transparent,
         child: InkWell(
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(22),
           onTap: w.entries.isEmpty ? null : () => setState(() => _open = !_open),
           child: Padding(
             padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
@@ -10841,7 +12118,7 @@ class _StudentStatCardState extends State<StudentStatCard> {
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.w800,
-                    color: good ? null : kAbsent,
+                    color: good ? Colors.white : const Color(0xFFFFB3C0),
                   ),
                 ),
                 if (w.father.trim().isNotEmpty) ...[
@@ -10861,12 +12138,12 @@ class _StudentStatCardState extends State<StudentStatCard> {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                   decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.16),
+                    gradient: good ? kBlueGrad : kRedGrad,
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: Text('${pct.toStringAsFixed(1)}%',
-                      style: TextStyle(
-                          color: color,
+                      style: const TextStyle(
+                          color: Colors.white,
                           fontWeight: FontWeight.w800,
                           fontSize: 14)),
                 ),
@@ -10875,8 +12152,8 @@ class _StudentStatCardState extends State<StudentStatCard> {
                   borderRadius: BorderRadius.circular(4),
                   child: LinearProgressIndicator(
                     value: (pct / 100).clamp(0.0, 1.0).toDouble(),
-                    minHeight: 5,
-                    backgroundColor: kOutline,
+                    minHeight: 8,
+                    backgroundColor: const Color(0x33FFFFFF),
                     color: color,
                   ),
                 ),
@@ -10884,9 +12161,7 @@ class _StudentStatCardState extends State<StudentStatCard> {
                 Row(
                   children: [
                     _stat('${w.present}', 'Present', kPresent),
-                    Container(width: 1, height: 26, color: kOutline),
                     _stat('${w.absent}', 'Absent', kAbsent),
-                    Container(width: 1, height: 26, color: kOutline),
                     _stat('${w.total}', 'Sessions', Colors.white70),
                   ],
                 ),
@@ -11068,6 +12343,7 @@ class _AttendanceSheetScreenState extends State<AttendanceSheetScreen> {
   List<Map<String, String>> _students = [];
   List<DateRecord> _all = [];
   String _scope = 'all'; // 'all', kTypeClass or kTypeLab
+  String _phase = 'all'; // 'all' (Overall), kPhaseMid or kPhaseFinal
   bool _letters = true; // true: P / A, false: 1 / 0
 
   final ScrollController _headH1 = ScrollController();
@@ -11145,7 +12421,7 @@ class _AttendanceSheetScreenState extends State<AttendanceSheetScreen> {
   }
 
   List<DateRecord> get _records {
-    var list = filterRecordsByScope(_all, _scope);
+    var list = filterRecordsByScope(_all, _scope, phase: _phase);
     final m = widget.month;
     if (m != null) {
       final key = DateFormat('yyyy-MM').format(m);
@@ -11188,13 +12464,11 @@ class _AttendanceSheetScreenState extends State<AttendanceSheetScreen> {
   Widget _chip(String label, bool selected, VoidCallback onTap) {
     return Padding(
       padding: const EdgeInsets.only(right: 8),
-      child: ChoiceChip(
-        label: Text(label),
-        selected: selected,
-        onSelected: (_) => onTap(),
-        selectedColor: kAccent.withValues(alpha: 0.25),
-        side: const BorderSide(color: kOutline),
-        labelStyle: const TextStyle(fontSize: 12.5),
+      child: GradPill(
+        label: label,
+        filled: selected,
+        onTap: onTap,
+        fontSize: 12.5,
       ),
     );
   }
@@ -11214,6 +12488,12 @@ class _AttendanceSheetScreenState extends State<AttendanceSheetScreen> {
             _chip('Lab', _scope == kTypeLab,
                 () => setState(() => _scope = kTypeLab)),
           ],
+          const SizedBox(width: 8),
+          _chip('Overall', _phase == 'all', () => setState(() => _phase = 'all')),
+          _chip('Mid', _phase == kPhaseMid,
+              () => setState(() => _phase = kPhaseMid)),
+          _chip('Final', _phase == kPhaseFinal,
+              () => setState(() => _phase = kPhaseFinal)),
           const SizedBox(width: 8),
           _chip('P / A', _letters, () => setState(() => _letters = true)),
           _chip('1 / 0', !_letters, () => setState(() => _letters = false)),
@@ -11578,10 +12858,10 @@ class _MonthlyAttendanceScreenState extends State<MonthlyAttendanceScreen> {
     if (_exporting || _records.isEmpty || _students.isEmpty) return;
     final opt = await askExportOptions(context, _records);
     if (opt == null || !mounted) return;
-    final recs = filterRecordsByScope(_records, opt.scope)
+    final recs = filterRecordsByScope(_records, opt.scope, phase: opt.phase)
       ..sort((a, b) => a.id.compareTo(b.id));
     if (recs.isEmpty) {
-      showSnack(context, 'No ${scopeLabel(opt.scope)} sessions in this month.',
+      showSnack(context, 'No ${optionsLabel(opt)} sessions in this month.',
           color: kAbsent);
       return;
     }
@@ -11600,7 +12880,7 @@ class _MonthlyAttendanceScreenState extends State<MonthlyAttendanceScreen> {
           exportFileBase(widget.sem, widget.semLabel, widget.subjectName);
       final monthKey = DateFormat('yyyy-MM').format(_month);
       final fileName =
-          '${base}_${monthKey}_${scopeFileTag(opt.scope)}Monthly_Report.xlsx';
+          '${base}_${monthKey}_${phaseFileTag(opt.phase)}${scopeFileTag(opt.scope)}Monthly_Report.xlsx';
       if (!mounted) return;
       if (kIsWeb) {
         await webShareOrDownload(context, bytes, fileName,
@@ -11681,7 +12961,7 @@ class _MonthlyAttendanceScreenState extends State<MonthlyAttendanceScreen> {
                           semLabel: widget.semLabel,
                           subjectName: widget.subjectName,
                           month: _month,
-                        ),
+                        )
                       ),
                     ),
           ),

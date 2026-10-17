@@ -1,5 +1,9 @@
 // Used on Android / iOS / desktop builds. The web versions of these
 // functions live in download_web.dart.
+String lastShareError = '';
+
+bool isAndroidBrowser() => false;
+
 void downloadBytes(List<int> bytes, String fileName) {
   throw UnsupportedError('downloadBytes is only available on web');
 }

@@ -1,6 +1,6 @@
 // Offline cache for SAM.
 // Change VERSION on every deploy so old files get dropped.
-const VERSION = 'sam-v9';
+const VERSION = 'sam-v14';
 
 const BASICS = [
   './',

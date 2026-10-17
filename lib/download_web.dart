@@ -25,63 +25,74 @@ void downloadBytes(List<int> bytes, String fileName) {
   web.URL.revokeObjectURL(url);
 }
 
-// Opens the phone's share sheet (WhatsApp, Gmail, Drive...) with the file.
-// Returns true if the share sheet was shown (even if the user closed it),
-// false if this browser/device cannot share files.
-Future<bool> _shareBytes(List<int> bytes, String fileName, String? text) async {
+// True on Android browsers. Chrome on Android refuses to share .xlsx / .json
+// files through the share sheet, so there we simply download the file.
+// iPhone / iPad (Safari) can share them, so they keep the share sheet.
+bool isAndroidBrowser() {
   try {
-    final file = web.File(
-      [Uint8List.fromList(bytes).toJS].toJS,
-      fileName,
-      web.FilePropertyBag(type: _mimeFor(fileName)),
-    );
-    final data = web.ShareData(
-      files: [file].toJS,
-      title: fileName,
-      text: text ?? fileName,
-    );
-    if (!web.window.navigator.canShare(data)) return false;
-    await web.window.navigator.share(data).toDart;
-    return true;
-  } catch (e) {
-    // User closed the share sheet -> nothing more to do.
-    if (e.toString().contains('AbortError')) return true;
+    return web.window.navigator.userAgent.toLowerCase().contains('android');
+  } catch (_) {
     return false;
   }
 }
 
-// Share sheet first (like the Android app); if the browser cannot share
-// files (or the tap permission expired), fall back to a normal download.
-Future<void> saveOrShareBytes(List<int> bytes, String fileName,
-    {String? text}) async {
-  final shared = await _shareBytes(bytes, fileName, text);
-  if (!shared) downloadBytes(bytes, fileName);
+// Last share error text (shown to the user so we can see why sharing failed).
+String lastShareError = '';
+
+// Builds the share payload. Tries file + title + text first, then file only
+// (some browsers refuse the combination). Returns null if files cannot be shared.
+web.ShareData? _buildShareData(
+    List<int> bytes, String fileName, String? text) {
+  final file = web.File(
+    [Uint8List.fromList(bytes).toJS].toJS,
+    fileName,
+    web.FilePropertyBag(type: _mimeFor(fileName)),
+  );
+  final nav = web.window.navigator;
+  final withText = web.ShareData(
+    files: [file].toJS,
+    title: fileName,
+    text: text ?? fileName,
+  );
+  if (nav.canShare(withText)) return withText;
+  final filesOnly = web.ShareData(files: [file].toJS);
+  if (nav.canShare(filesOnly)) return filesOnly;
+  return null;
 }
 
 // Returns 'shared' | 'unsupported' | 'expired' ('expired' = the browser needs
 // a fresh tap before it allows the share sheet).
+// IMPORTANT: call this directly inside the tap handler, before any await.
 Future<String> shareBytesNow(List<int> bytes, String fileName,
     {String? text}) async {
+  lastShareError = '';
   try {
-    final file = web.File(
-      [Uint8List.fromList(bytes).toJS].toJS,
-      fileName,
-      web.FilePropertyBag(type: _mimeFor(fileName)),
-    );
-    final data = web.ShareData(
-      files: [file].toJS,
-      title: fileName,
-      text: text ?? fileName,
-    );
-    if (!web.window.navigator.canShare(data)) return 'unsupported';
+    final data = _buildShareData(bytes, fileName, text);
+    if (data == null) {
+      lastShareError = 'This browser cannot share this file type';
+      return 'unsupported';
+    }
     await web.window.navigator.share(data).toDart;
     return 'shared';
   } catch (e) {
-    final s = e.toString();
-    if (s.contains('AbortError')) return 'shared';
-    if (s.contains('NotAllowedError')) return 'expired';
+    final msg = e.toString();
+    lastShareError = msg;
+    if (msg.contains('AbortError')) return 'shared'; // user closed the sheet
+    if (msg.contains('NotAllowedError')) return 'expired';
     return 'unsupported';
   }
+}
+
+// Share sheet first; if the browser cannot share files (or the tap permission
+// expired), fall back to a normal download.
+Future<void> saveOrShareBytes(List<int> bytes, String fileName,
+    {String? text}) async {
+  if (isAndroidBrowser()) {
+    downloadBytes(bytes, fileName);
+    return;
+  }
+  final r = await shareBytesNow(bytes, fileName, text: text);
+  if (r != 'shared') downloadBytes(bytes, fileName);
 }
 
 // Tells index.html whether the user is busy (marking attendance / reviewing an
