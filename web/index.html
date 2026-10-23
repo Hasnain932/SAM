@@ -1,19 +1,8 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!--
-    If you are serving your web app in a path other than the root, change the
-    href value below to reflect the base path you are serving from.
-
-    The path provided below has to start and end with a slash "/" in order for
-    it to work correctly.
-
-    For more details:
-    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
-
-    This is a placeholder for base href that will be replaced by the value of
-    the `--base-href` argument provided to `flutter build`.
-  -->
+  <!-- This is a placeholder for base href that will be replaced by the value of
+       the `--base-href` argument provided to `flutter build`. -->
   <base href="$FLUTTER_BASE_HREF">
 
   <meta charset="UTF-8">
@@ -36,46 +25,160 @@
   <link rel="manifest" href="manifest.json">
 </head>
 <body>
+  <!-- Simple loading screen. It sits under the app and is removed when the app starts. -->
+  <div id="sam-loading" style="position:fixed;left:0;top:0;right:0;bottom:0;z-index:0;
+       display:flex;flex-direction:column;align-items:center;justify-content:center;
+       background:#0B1633;color:#fff;text-align:center;padding:24px;
+       font:16px -apple-system,BlinkMacSystemFont,sans-serif;">
+    <div style="font-size:30px;font-weight:700;letter-spacing:3px;">SAM</div>
+    <div style="margin-top:14px;opacity:.8;">Loading... the first time can take up to a minute.</div>
+  </div>
+
   <!-- Our own offline service worker (see sw.js) -->
   <script>
-    if ('serviceWorker' in navigator) {
-      // When a new version takes over, reload once so it shows up right away.
-      // If the user is busy (marking attendance / reviewing an import), wait
-      // and reload as soon as they leave that screen.
-      var hadController = !!navigator.serviceWorker.controller;
-      var reloaded = false;
-      var pendingReload = false;
-      var busyCount = 0;
-      function doReload() {
-        if (reloaded) return;
-        reloaded = true;
-        window.location.reload();
-      }
-      window.samSetBusy = function (busy) {
-        busyCount = Math.max(0, busyCount + (busy ? 1 : -1));
-        if (busyCount === 0 && pendingReload) doReload();
-      };
+    var samStarted = false;
+    var samSwStarted = false;
+    var hadController = !!(navigator.serviceWorker && navigator.serviceWorker.controller);
+    var reloaded = false;
+    var pendingReload = false;
+    var busyCount = 0;
+
+    function doReload() {
+      if (reloaded) return;
+      reloaded = true;
+      window.location.reload();
+    }
+    // The app calls this while the user is busy (marking attendance / reviewing an import).
+    window.samSetBusy = function (busy) {
+      busyCount = Math.max(0, busyCount + (busy ? 1 : -1));
+      if (busyCount === 0 && pendingReload) doReload();
+    };
+
+    // Send the list of files the app really loaded to the worker,
+    // so all of them are stored for offline use.
+    function samWarmUp() {
+      navigator.serviceWorker.ready.then(function (reg) {
+        if (!reg.active) return;
+        var urls = performance.getEntriesByType('resource')
+          .map(function (e) { return e.name; })
+          .filter(function (u) {
+            return u.indexOf(location.origin) === 0 ||
+              u.indexOf('https://www.gstatic.com/firebasejs/') === 0 ||
+              u.indexOf('https://fonts.gstatic.com/') === 0;
+          });
+        reg.active.postMessage({ type: 'CACHE_URLS', urls: urls });
+        reg.active.postMessage({ type: 'CACHE_ASSETS' });
+      }).catch(function () {});
+    }
+
+    // The worker is started only AFTER the app is on screen. Starting it earlier
+    // makes it download the same big files a second time while the app is still
+    // loading, which makes a slow phone connection even slower.
+    function samStartSw() {
+      if (samSwStarted || !('serviceWorker' in navigator)) return;
+      samSwStarted = true;
+
       navigator.serviceWorker.addEventListener('controllerchange', function () {
+        // When a new version takes over, reload once so it shows up right away.
         if (!hadController) return;
         if (busyCount > 0) { pendingReload = true; return; }
         doReload();
       });
-      window.addEventListener('load', function () {
-        navigator.serviceWorker
-          .register('sw.js', { updateViaCache: 'none' })
-          .catch(function () {});
-      });
+
+      navigator.serviceWorker
+        .register('sw.js', { updateViaCache: 'none' })
+        .then(function (reg) {
+          // Look for a new version whenever the app comes back to the screen.
+          document.addEventListener('visibilitychange', function () {
+            if (document.visibilityState === 'visible') {
+              reg.update().catch(function () {});
+            }
+          });
+        })
+        .catch(function (e) { window.samSwError = String((e && e.message) || e); });
+
+      // Ask the browser not to delete our offline files when space is low.
+      if (navigator.storage && navigator.storage.persist) {
+        navigator.storage.persist().catch(function () {});
+      }
+
+      setTimeout(samWarmUp, 10000);
+      setTimeout(samWarmUp, 40000);
     }
+
+    function samMarkStarted() {
+      if (samStarted) return;
+      samStarted = true;
+      var l = document.getElementById('sam-loading');
+      if (l) l.remove();
+      var b = document.getElementById('sam-diag');
+      if (b) b.remove();
+      samStartSw();
+    }
+
+    window.addEventListener('flutter-first-frame', samMarkStarted);
+    var samPoll = setInterval(function () {
+      var gp = document.querySelector('flt-glass-pane');
+      if (gp && gp.shadowRoot && gp.shadowRoot.querySelector('canvas')) {
+        clearInterval(samPoll);
+        samMarkStarted();
+      }
+    }, 500);
+    // Safety net: start the worker anyway if the app was not detected.
+    setTimeout(samStartSw, 90000);
   </script>
 
-  <!--
-    You can customize the "flutter_bootstrap.js" script.
-    This is useful to provide a custom configuration to the Flutter loader
-    or to give the user feedback during the initialization process.
+  <!-- Diagnostic: if the app still did not start after 40 seconds, show why
+       (tap the red box to close it; it removes itself if the app starts later).
+       Safe to delete once offline works on iPhone. -->
+  <script>
+    var samErrors = [];
+    window.addEventListener('error', function (e) {
+      var t = e.target;
+      samErrors.push(t && (t.src || t.href) ? 'failed to load: ' + (t.src || t.href) : String(e.message));
+    }, true);
+    window.addEventListener('unhandledrejection', function (e) {
+      var r = e.reason;
+      samErrors.push('error: ' + String((r && (r.message || r)) || 'unknown'));
+    });
+    setTimeout(async function () {
+      try {
+        if (samStarted) return;
+        var ios = navigator.userAgent.match(/OS ([\d_]+)/);
+        var lines = ['App did not start (40 s)'];
+        lines.push('online: ' + navigator.onLine + '   iOS: ' + (ios ? ios[1] : '?') +
+          '   wasm: ' + (typeof WebAssembly) + '   loader: ' + (window._flutter ? 'yes' : 'no'));
+        lines.push('SW controller: ' +
+          (navigator.serviceWorker && navigator.serviceWorker.controller ? 'yes' : 'no'));
+        if (window.samSwError) lines.push('SW register error: ' + window.samSwError);
+        lines.push('errors: ' + (samErrors.slice(0, 8).join(' | ') || 'none'));
+        var done = performance.getEntriesByType('resource')
+          .filter(function (r) { return /\.(js|wasm)(\?|$)/.test(r.name); })
+          .map(function (r) { return r.name.split('/').pop().split('?')[0] + ' ' + Math.round(r.duration) + 'ms'; });
+        lines.push('loaded: ' + (done.join(', ') || 'nothing'));
+        var names = await caches.keys();
+        for (var i = 0; i < names.length; i++) {
+          var c = await caches.open(names[i]);
+          var keys = await c.keys();
+          lines.push(names[i] + ' (' + keys.length + ' files):');
+          lines.push(keys.map(function (r) {
+            var u = new URL(r.url);
+            return u.origin === location.origin ? u.pathname : u.host + u.pathname;
+          }).join('  '));
+        }
+        if (samStarted) return;
+        var box = document.createElement('div');
+        box.id = 'sam-diag';
+        box.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:99999;' +
+          'background:#7a0000;color:#fff;font:11px monospace;white-space:pre-wrap;' +
+          'word-break:break-all;padding:calc(env(safe-area-inset-top,0px) + 8px) 8px 8px;';
+        box.textContent = lines.join('\n');
+        box.onclick = function () { box.remove(); };
+        document.body.appendChild(box);
+      } catch (e) {}
+    }, 40000);
+  </script>
 
-    For more details:
-    * https://docs.flutter.dev/platform-integration/web/initialization
-  -->
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

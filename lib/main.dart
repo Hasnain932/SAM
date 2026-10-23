@@ -74,10 +74,85 @@ const int kPickerEndHour = 18;
 const bool kAllowAdminSignUp = false;
 
 // ---- Second (hidden) admin ----
-// Stored like a normal department and found only by username.
+// The username and password are NOT stored in the code or in Firebase, only
+// a SHA-256 hash of 'sam|username|password' (so nobody can read them from the
+// web files). To change them, compute the hash of the new 'sam|user|pass'.
 const String kHiddenAdminDeptName = 'Information Technology';
-const String kHiddenAdminUsername = 'BUDDY';
-const String kHiddenAdminPassword = 'buddy11';
+const String kHiddenAdminHash =
+    'f03f5a24ec11db894580dddbacab1c7ad267a803efe6b73df14fc600825328bc';
+
+const List<int> _kSha256K = [
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+  0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+  0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+  0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+  0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+  0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+  0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+  0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+// Small SHA-256 (works on Android, iOS and web builds, no extra package).
+String _sha256Hex(String input) {
+  const m = 0xFFFFFFFF;
+  int rotr(int x, int n) => ((x >> n) | (x << (32 - n))) & m;
+  final data = utf8.encode(input);
+  final bitLen = data.length * 8;
+  final bytes = <int>[...data, 0x80];
+  while (bytes.length % 64 != 56) {
+    bytes.add(0);
+  }
+  for (var i = 7; i >= 0; i--) {
+    bytes.add((bitLen >> (i * 8)) & 0xFF);
+  }
+  var h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+  var h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+  final w = List<int>.filled(64, 0);
+  for (var off = 0; off < bytes.length; off += 64) {
+    for (var i = 0; i < 16; i++) {
+      w[i] = (bytes[off + i * 4] << 24) |
+          (bytes[off + i * 4 + 1] << 16) |
+          (bytes[off + i * 4 + 2] << 8) |
+          bytes[off + i * 4 + 3];
+    }
+    for (var i = 16; i < 64; i++) {
+      final s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+      final s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & m;
+    }
+    var a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+    for (var i = 0; i < 64; i++) {
+      final s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      final ch = (e & f) ^ ((~e & m) & g);
+      final t1 = (h + s1 + ch + _kSha256K[i] + w[i]) & m;
+      final s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      final maj = (a & b) ^ (a & c) ^ (b & c);
+      final t2 = (s0 + maj) & m;
+      h = g;
+      g = f;
+      f = e;
+      e = (d + t1) & m;
+      d = c;
+      c = b;
+      b = a;
+      a = (t1 + t2) & m;
+    }
+    h0 = (h0 + a) & m;
+    h1 = (h1 + b) & m;
+    h2 = (h2 + c) & m;
+    h3 = (h3 + d) & m;
+    h4 = (h4 + e) & m;
+    h5 = (h5 + f) & m;
+    h6 = (h6 + g) & m;
+    h7 = (h7 + h) & m;
+  }
+  return [h0, h1, h2, h3, h4, h5, h6, h7]
+      .map((x) => x.toRadixString(16).padLeft(8, '0'))
+      .join();
+}
 
 const String kSoftwareEngineeringDeptId = "Software Engineering";
 
@@ -1369,6 +1444,7 @@ class AppSession {
     teacherId = id;
     teacherName = name;
     await _save();
+    await _waitAnon();
     tick.value++;
     unawaited(_anon());
   }
@@ -1378,8 +1454,21 @@ class AppSession {
     teacherId = '';
     teacherName = '';
     await _save();
+    await _waitAnon();
     tick.value++;
     unawaited(_anon());
+  }
+
+  // Wait (max 4 s, online only) for the anonymous sign-in before the first
+  // screen opens, so the first Firestore reads already have request.auth.
+  // Offline or slow: skip; liveQuery retries as a backup.
+  static Future<void> _waitAnon() async {
+    try {
+      if (FirebaseAuth.instance.currentUser != null) return;
+      final r = await Connectivity().checkConnectivity();
+      if (r.every((x) => x == ConnectivityResult.none)) return;
+      await _anon().timeout(const Duration(seconds: 4));
+    } catch (_) {}
   }
 
   // Clear the old session when logging in as a Firebase admin.
@@ -1402,6 +1491,25 @@ class AppSession {
             .timeout(const Duration(seconds: 6));
       }
     } catch (_) {}
+  }
+
+  // Last sign-in failure code (for a clear message instead of a vague one).
+  static String lastAuthError = '';
+
+  // Makes sure a Firebase user exists (anonymous is fine) before a write that
+  // needs request.auth != null. Never throws; returns false if sign-in failed.
+  static Future<bool> ensureSignedIn() async {
+    try {
+      if (FirebaseAuth.instance.currentUser != null) return true;
+      await FirebaseAuth.instance
+          .signInAnonymously()
+          .timeout(const Duration(seconds: 8));
+      return FirebaseAuth.instance.currentUser != null;
+    } catch (e) {
+      lastAuthError = e is FirebaseException ? e.code : e.runtimeType.toString();
+      debugPrint('ensureSignedIn failed: $e');
+      return false;
+    }
   }
 
   static Future<void> logout() async {
@@ -1916,7 +2024,7 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
           await AppSession.loginHiddenAdmin();
           if (mounted) Navigator.of(context).popUntil((r) => r.isFirst);
         } else {
-          setState(() => _errorMessage = "Incorrect username or password");
+          setState(() => _errorMessage = "Incorrect email or password");
         }
       }
     } on FirebaseAuthException catch (e) {
@@ -1931,14 +2039,7 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
   }
 
   Future<bool> _checkHiddenAdmin(String username, String password) async {
-    if (username != kHiddenAdminUsername) return false;
-    final snap = await safeGetQuery(FirebaseFirestore.instance
-        .collection('departments')
-        .where('username', isEqualTo: username));
-    for (final d in snap.docs) {
-      if ((d.data()['password'] ?? '').toString() == password) return true;
-    }
-    return false;
+    return _sha256Hex('sam|$username|$password') == kHiddenAdminHash;
   }
 
   @override
@@ -1957,7 +2058,7 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
       subtitle: 'Secure access to your dashboard',
       children: [
         AuthField(
-          label: 'Email or username',
+          label: 'Email',
           hint: 'you@gmail.com',
           icon: Icons.person_outline,
           controller: _idController,
@@ -2230,6 +2331,43 @@ class TeacherRequestsScreen extends StatelessWidget {
     }));
   }
 
+  // Denied tab only: removes the teacher account completely. The same username
+  // can then sign up again (new request -> Pending -> Approve / Deny -> Delete).
+  Future<void> _confirmDelete(
+      BuildContext context, String id, String name) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete this teacher?'),
+        content: Text(
+            "'$name' will be removed permanently. They can send a new request by signing up again."),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete', style: TextStyle(color: kAbsent)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    // Not awaited: delete() never completes offline. The list updates from the local cache.
+    unawaited(FirebaseFirestore.instance
+        .collection('teachers')
+        .doc(id)
+        .delete()
+        .catchError((_) {
+      if (context.mounted) {
+        showSnack(context, 'Could not delete the teacher.', color: kAbsent);
+      }
+    }));
+    unawaited(LocalDb.deleteTeacher(id));
+    if (context.mounted) showSnack(context, 'Teacher deleted');
+  }
+
   Widget _list(BuildContext context,
       List<QueryDocumentSnapshot<Map<String, dynamic>>> docs, String status) {
     final items = docs.where((d) => teacherStatusOf(d.data()) == status).toList()
@@ -2272,6 +2410,12 @@ class TeacherRequestsScreen extends StatelessWidget {
                   onPressed: () => _setStatus(context, d.id, 'denied'),
                   style: TextButton.styleFrom(foregroundColor: kAbsent),
                   child: const Text('Deny'),
+                ),
+              if (status == 'denied')
+                IconButton(
+                  tooltip: 'Delete',
+                  onPressed: () => _confirmDelete(context, d.id, name),
+                  icon: const Icon(Icons.delete_outline, color: kAbsent),
                 ),
               if (status != 'approved')
                 ElevatedButton(
@@ -2435,6 +2579,59 @@ class SemRef {
 }
 
 String defaultSemesterLabel(String semesterId) => 'Semester $semesterId';
+
+// ---- Sections / semesters added by the admin ----
+// Both lists live on the department document itself (the same document the
+// admin already edits when renaming), so no new Firestore path is needed:
+//   departments/{dept}.extra_sections  = ['E', ...]
+//   departments/{dept}.extra_semesters = ['E|9', ...]   (section|semester)
+// The built-in ones (A-D and 1-8) always stay.
+DocumentReference<Map<String, dynamic>> deptDocRef(String deptId) =>
+    FirebaseFirestore.instance.collection('departments').doc(deptId);
+
+DocumentReference<Map<String, dynamic>> sectionDocRef(
+        String deptId, String section) =>
+    deptDocRef(deptId).collection('sections').doc(section);
+
+List<String> _mergeIds(List<String> base, dynamic extra) {
+  final out = <String>[...base];
+  if (extra is Iterable) {
+    final more = extra
+        .map((e) => e.toString())
+        .where((e) => e.isNotEmpty && !out.contains(e))
+        .toList();
+    more.sort((a, b) {
+      final na = int.tryParse(a), nb = int.tryParse(b);
+      if (na != null && nb != null) return na.compareTo(nb);
+      return a.compareTo(b);
+    });
+    out.addAll(more);
+  }
+  return out;
+}
+
+List<String> sectionsFrom(Map<String, dynamic>? deptData) =>
+    _mergeIds(kSections, deptData?['extra_sections']);
+
+List<String> semestersFrom(Map<String, dynamic>? deptData, String section) {
+  final raw = deptData?['extra_semesters'];
+  final mine = <String>[];
+  if (raw is Iterable) {
+    final prefix = '$section|';
+    for (final e in raw) {
+      final v = e.toString();
+      if (v.startsWith(prefix) && v.length > prefix.length) {
+        mine.add(v.substring(prefix.length));
+      }
+    }
+  }
+  return _mergeIds(kSemesterIds, mine);
+}
+
+Future<List<String>> loadSemesterIds(String deptId, String section) async {
+  final snap = await safeGetDocOrNull(deptDocRef(deptId));
+  return semestersFrom(snap?.data(), section);
+}
 
 CollectionReference<Map<String, dynamic>> teacherClaimsRef(String teacherId) =>
     FirebaseFirestore.instance
@@ -2725,23 +2922,43 @@ Future<void> finishStudentWrite(
 }
 
 // Cache-first live query for StreamBuilders: device cache first, then live updates.
+// A live-listener error (for example "permission-denied" right after login,
+// before the anonymous sign-in has finished) is never passed to the screen:
+// that used to wipe the list. The last good data stays visible and the
+// listener is simply started again after a short delay.
 Stream<QuerySnapshot<Map<String, dynamic>>> liveQuery(
     Query<Map<String, dynamic>> q) {
   late final StreamController<QuerySnapshot<Map<String, dynamic>>> ctrl;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? sub;
+  Timer? retryTimer;
   bool gotLive = false;
   bool cancelled = false;
+  int retries = 0;
+
+  void listen() {
+    if (cancelled) return;
+    sub?.cancel();
+    sub = q.snapshots().listen(
+      (snap) {
+        gotLive = true;
+        retries = 0;
+        if (!cancelled && !ctrl.isClosed) ctrl.add(snap);
+      },
+      onError: (Object e, StackTrace st) {
+        debugPrint('liveQuery error (will retry): $e');
+        if (cancelled || retries >= 12) return;
+        retries++;
+        final wait = Duration(seconds: retries < 5 ? retries : 5);
+        retryTimer?.cancel();
+        retryTimer = Timer(wait, listen);
+      },
+      cancelOnError: true,
+    );
+  }
+
   ctrl = StreamController<QuerySnapshot<Map<String, dynamic>>>(
     onListen: () {
-      sub = q.snapshots().listen(
-        (snap) {
-          gotLive = true;
-          if (!cancelled) ctrl.add(snap);
-        },
-        onError: (Object e, StackTrace st) {
-          if (!cancelled) ctrl.addError(e, st);
-        },
-      );
+      listen();
       unawaited(() async {
         try {
           final cached = await q.get(const GetOptions(source: Source.cache));
@@ -2758,6 +2975,7 @@ Stream<QuerySnapshot<Map<String, dynamic>>> liveQuery(
     },
     onCancel: () async {
       cancelled = true;
+      retryTimer?.cancel();
       await sub?.cancel();
     },
   );
@@ -3946,10 +4164,19 @@ Future<void> claimSubject(
     return;
   }
 
-  final subRef = sem.subjectDoc(subject);
-  final claimRef =
-      teacherClaimsRef(AppSession.teacherId).doc(sem.claimKey(subject));
+  // The rules need request.auth != null. Make sure a user exists first.
+  if (!await AppSession.ensureSignedIn()) {
+    if (context.mounted) {
+      showSnack(context,
+          'Could not sign in to the server (${AppSession.lastAuthError}). Check that Anonymous sign-in is enabled in Firebase Authentication.');
+    }
+    return;
+  }
+
   try {
+    final subRef = sem.subjectDoc(subject);
+    final claimRef =
+        teacherClaimsRef(AppSession.teacherId).doc(sem.claimKey(subject));
     await FirebaseFirestore.instance.runTransaction((tx) async {
       final snap = await tx.get(subRef);
       if (!snap.exists) throw ClaimException('This subject no longer exists.');
@@ -3976,9 +4203,36 @@ Future<void> claimSubject(
     if (context.mounted) showSnack(context, "You claimed '$subject'");
   } on ClaimException catch (e) {
     if (context.mounted) showSnack(context, e.message);
-  } catch (_) {
+  } on FirebaseException catch (e) {
+    debugPrint('claimSubject failed: ${e.code} ${e.message}');
+    String msg;
+    switch (e.code) {
+      case 'permission-denied':
+      case 'unauthenticated':
+        msg =
+            'The server refused this action (${e.code}). Please log out, log in again and retry. If it continues, check the Firestore rules.';
+        break;
+      case 'unavailable':
+      case 'deadline-exceeded':
+      case 'network-request-failed':
+        msg = 'Could not reach the server. Please check your internet and try again.';
+        break;
+      case 'aborted':
+      case 'failed-precondition':
+        msg = 'Someone else changed this subject at the same time. Please try again.';
+        break;
+      default:
+        msg = 'Could not claim the subject (${e.code}). Please try again.';
+    }
+    if (context.mounted) showSnack(context, msg);
+  } on TimeoutException {
     if (context.mounted) {
-      showSnack(context, 'Could not claim the subject. Please check your internet and try again.');
+      showSnack(context, 'The server took too long. Please check your internet and try again.');
+    }
+  } catch (e) {
+    debugPrint('claimSubject failed: $e');
+    if (context.mounted) {
+      showSnack(context, 'Could not claim the subject (${e.runtimeType}). Please try again.');
     }
   }
 }
@@ -4345,8 +4599,21 @@ Future<void> deleteDepartmentEverywhere(String deptId) async {
       .doc('seed')
       .set({'done': true}, SetOptions(merge: true)).catchError((_) {}));
 
-  for (final sec in kSections) {
-    for (final sid in kSemesterIds) {
+  // Built-in sections/semesters plus the ones the admin added (found from the
+  // saved list AND from the documents that exist, so nothing is left behind).
+  final deptSnap = await safeGetDocOrNull(deptDocRef(deptId));
+  final allSections = <String>{...sectionsFrom(deptSnap?.data())};
+  for (final d
+      in await _getDocsForDelete(deptDocRef(deptId).collection('sections'))) {
+    allSections.add(d.id);
+  }
+  for (final sec in allSections) {
+    final allSems = <String>{...semestersFrom(deptSnap?.data(), sec)};
+    for (final d in await _getDocsForDelete(
+        sectionDocRef(deptId, sec).collection('semesters'))) {
+      allSems.add(d.id);
+    }
+    for (final sid in allSems) {
       final sem = SemRef(deptId, sec, sid);
       final subjects = await _getDocsForDelete(sem.subjects);
       for (final sub in subjects) {
@@ -4358,6 +4625,7 @@ Future<void> deleteDepartmentEverywhere(String deptId) async {
       _deleteDocs(await _getDocsForDelete(sem.students));
       unawaited(sem.doc.delete().catchError((_) {}));
     }
+    unawaited(sectionDocRef(deptId, sec).delete().catchError((_) {}));
   }
 
   // Old data from before sections existed, if any is left
@@ -4782,8 +5050,6 @@ Future<void> ensureHiddenAdminDepartment() async {
     if (!snap.exists) {
       await deptRef.set({
         'name': kHiddenAdminDeptName,
-        'username': kHiddenAdminUsername,
-        'password': kHiddenAdminPassword,
       }).timeout(const Duration(seconds: 10));
     }
     await metaRef.set({'done': true}).timeout(const Duration(seconds: 10));
@@ -5163,6 +5429,12 @@ class LocalDb {
         {'teacher_id': id, 'name': name, 'username': username},
         conflictAlgorithm: sql.ConflictAlgorithm.replace,
       );
+    });
+  }
+
+  static Future<void> deleteTeacher(String id) {
+    return _run((db) async {
+      await db.delete('teachers', where: 'teacher_id = ?', whereArgs: [id]);
     });
   }
 
@@ -6609,57 +6881,117 @@ class SectionsScreen extends StatelessWidget {
   final String deptName;
   const SectionsScreen({super.key, required this.deptId, required this.deptName});
 
+  // Admin only: add a new section (A-D are built in).
+  void _showAddSectionDialog(BuildContext context, List<String> existing) {
+    final controller = TextEditingController();
+    String? errorText;
+    showDialog(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setLocal) => AlertDialog(
+          title: const Text('Add New Section'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            textCapitalization: TextCapitalization.characters,
+            decoration: InputDecoration(
+              labelText: 'Section name (e.g. E)',
+              errorText: errorText,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                final name = controller.text.trim().toUpperCase();
+                if (name.isEmpty || name.contains('/') || name.contains('|')) {
+                  setLocal(() => errorText = 'Enter a valid section name');
+                  return;
+                }
+                if (existing.contains(name)) {
+                  setLocal(() => errorText = 'This section already exists');
+                  return;
+                }
+                unawaited(deptDocRef(deptId)
+                    .set({
+                      'extra_sections': FieldValue.arrayUnion([name])
+                    }, SetOptions(merge: true))
+                    .catchError((_) {}));
+                Navigator.pop(dialogContext);
+                if (context.mounted) showSnack(context, 'Section $name added');
+              },
+              child: const Text('Add'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: headerAppBar(title: deptName),
-      body: ListView(
-        padding: const EdgeInsets.only(top: 8, bottom: 24),
-        children: [
-          const Padding(
-            padding: EdgeInsets.fromLTRB(20, 4, 20, 8),
-            child: Text('Choose a section',
-                style: TextStyle(color: kMuted, fontSize: 14)),
-          ),
-          for (final sec in kSections)
-            AppCard(
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => SemestersScreen(
-                      deptId: deptId, deptName: deptName, section: sec),
-                ),
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: deptDocRef(deptId).snapshots(),
+      builder: (context, snapshot) {
+        final sections = sectionsFrom(snapshot.data?.data());
+        return Scaffold(
+          appBar: headerAppBar(title: deptName),
+          floatingActionButton: AppSession.isAdmin
+              ? GradFab(
+                  onPressed: () => _showAddSectionDialog(context, sections))
+              : null,
+          body: ListView(
+            padding: const EdgeInsets.only(top: 8, bottom: 90),
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 4, 20, 8),
+                child: Text('Choose a section',
+                    style: TextStyle(color: kMuted, fontSize: 14)),
               ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 44,
-                    height: 44,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [kAccent, kAccent2],
-                      ),
-                      borderRadius: BorderRadius.circular(12),
+              for (final sec in sections)
+                AppCard(
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => SemestersScreen(
+                          deptId: deptId, deptName: deptName, section: sec),
                     ),
-                    child: Text(sec,
-                        style: const TextStyle(
-                            color: kOnAccent,
-                            fontSize: 20,
-                            fontWeight: FontWeight.w800)),
                   ),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: Text('Section $sec', style: kNameStyle),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 44,
+                        height: 44,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [kAccent, kAccent2],
+                          ),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text(sec,
+                            style: const TextStyle(
+                                color: kOnAccent,
+                                fontSize: 20,
+                                fontWeight: FontWeight.w800)),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Text('Section $sec', style: kNameStyle),
+                      ),
+                      const Icon(Icons.chevron_right, color: kMuted),
+                    ],
                   ),
-                  const Icon(Icons.chevron_right, color: kMuted),
-                ],
-              ),
-            ),
-        ],
-      ),
+                ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -6729,6 +7061,54 @@ class SemestersScreen extends StatelessWidget {
     );
   }
 
+  // Admin only: add a new semester (1-8 are built in). The next free number
+  // is used as its ID, and the name can be changed right here.
+  void _showAddSemesterDialog(BuildContext context, List<String> existing) {
+    final nums = existing.map(int.tryParse).whereType<int>().toList();
+    final nextNum = nums.isEmpty ? 1 : nums.reduce((a, b) => a > b ? a : b) + 1;
+    final newId = nextNum.toString();
+    final controller = TextEditingController(text: defaultSemesterLabel(newId));
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Add New Semester'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Semester name'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              final label = controller.text.trim();
+              if (label.isEmpty) return;
+              unawaited(deptDocRef(deptId)
+                  .set({
+                    'extra_semesters':
+                        FieldValue.arrayUnion(['$section|$newId'])
+                  }, SetOptions(merge: true))
+                  .catchError((_) {}));
+              if (label != defaultSemesterLabel(newId)) {
+                final sem = SemRef(deptId, section, newId);
+                unawaited(sem.doc
+                    .set({'label': label}, SetOptions(merge: true))
+                    .catchError((_) {}));
+                unawaited(LocalDb.upsertSemesterLabel(sem, label));
+              }
+              Navigator.pop(dialogContext);
+              if (context.mounted) showSnack(context, '$label added');
+            },
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final labelsStream = liveQuery(FirebaseFirestore.instance
@@ -6738,63 +7118,75 @@ class SemestersScreen extends StatelessWidget {
         .doc(section)
         .collection('semesters'));
 
-    return Scaffold(
-      appBar: headerAppBar(title: deptName, subtitle: 'Section $section'),
-      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-        stream: labelsStream,
-        builder: (context, snapshot) {
-          final labels = <String, String>{};
-          for (final d in snapshot.data?.docs ?? []) {
-            final l = (d.data()['label'] ?? '').toString();
-            if (l.isNotEmpty) labels[d.id] = l;
-          }
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: deptDocRef(deptId).snapshots(),
+      builder: (context, secSnap) {
+        final semIds = semestersFrom(secSnap.data?.data(), section);
+        return Scaffold(
+          appBar: headerAppBar(title: deptName, subtitle: 'Section $section'),
+          floatingActionButton: AppSession.isAdmin
+              ? GradFab(
+                  onPressed: () => _showAddSemesterDialog(context, semIds))
+              : null,
+          body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: labelsStream,
+            builder: (context, snapshot) {
+              final labels = <String, String>{};
+              for (final d in snapshot.data?.docs ?? []) {
+                final l = (d.data()['label'] ?? '').toString();
+                if (l.isNotEmpty) labels[d.id] = l;
+              }
 
-          return ListView(
-            padding: const EdgeInsets.only(top: 8, bottom: 24),
-            children: [
-              const Padding(
-                padding: EdgeInsets.fromLTRB(20, 4, 20, 8),
-                child: Text('Choose a semester',
-                    style: TextStyle(color: kMuted, fontSize: 14)),
-              ),
-              for (final sid in kSemesterIds)
-                Builder(builder: (context) {
-                  final sem = SemRef(deptId, section, sid);
-                  final label = labels[sid] ?? defaultSemesterLabel(sid);
-                  return AppCard(
-                    onTap: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => SubjectsScreen(
-                          deptName: deptName,
-                          sem: sem,
-                          semLabel: label,
+              return ListView(
+                padding: const EdgeInsets.only(top: 8, bottom: 90),
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(20, 4, 20, 8),
+                    child: Text('Choose a semester',
+                        style: TextStyle(color: kMuted, fontSize: 14)),
+                  ),
+                  for (final sid in semIds)
+                    Builder(builder: (context) {
+                      final sem = SemRef(deptId, section, sid);
+                      final label = labels[sid] ?? defaultSemesterLabel(sid);
+                      return AppCard(
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => SubjectsScreen(
+                              deptName: deptName,
+                              sem: sem,
+                              semLabel: label,
+                            ),
+                          ),
                         ),
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        const IconBadge(icon: Icons.event_note_outlined),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Text(label, style: kNameStyle),
+                        child: Row(
+                          children: [
+                            const IconBadge(icon: Icons.event_note_outlined),
+                            const SizedBox(width: 14),
+                            Expanded(
+                              child: Text(label, style: kNameStyle),
+                            ),
+                            if (AppSession.isAdmin)
+                              IconButton(
+                                icon: const Icon(Icons.edit_outlined,
+                                    color: kMuted),
+                                tooltip: 'Rename semester',
+                                onPressed: () =>
+                                    _editLabelDialog(context, sem, label),
+                              )
+                            else
+                              const Icon(Icons.chevron_right, color: kMuted),
+                          ],
                         ),
-                        if (AppSession.isAdmin)
-                          IconButton(
-                            icon: const Icon(Icons.edit_outlined, color: kMuted),
-                            tooltip: 'Rename semester',
-                            onPressed: () => _editLabelDialog(context, sem, label),
-                          )
-                        else
-                          const Icon(Icons.chevron_right, color: kMuted),
-                      ],
-                    ),
-                  );
-                }),
-            ],
-          );
-        },
-      ),
+                      );
+                    }),
+                ],
+              );
+            },
+          ),
+        );
+      },
     );
   }
 }
@@ -8124,7 +8516,7 @@ Future<StudentImportDecision?> confirmStudentImportPlan(
                   const SizedBox(height: 8),
                   for (final s in plan.newOnes.take(5))
                     Text(
-                        '• ${s.name}${s.father.isEmpty ? '' : '  (S/O ${s.father})'}',
+                        '• ${s.name}${s.father.isEmpty ? '' : '  (F/N ${s.father})'}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis),
                   if (plan.newOnes.length > 5)
@@ -8299,6 +8691,7 @@ class ManageStudentsScreen extends StatelessWidget {
 
   Future<void> _showCopyDialog(BuildContext context) async {
     final labels = await loadSemesterLabels(sem.deptId, sem.section);
+    final semIds = await loadSemesterIds(sem.deptId, sem.section);
     if (!context.mounted) return;
     String? target;
     final chosen = await showDialog<String>(
@@ -8318,7 +8711,7 @@ class ManageStudentsScreen extends StatelessWidget {
                   style: const TextStyle(color: kMuted, fontSize: 12.5),
                 ),
                 const SizedBox(height: 8),
-                for (final id in kSemesterIds)
+                for (final id in semIds)
                   if (id != sem.semester)
                     ListTile(
                       dense: true,
@@ -8559,7 +8952,7 @@ class StudentNameBlock extends StatelessWidget {
         Text(name,
             style: TextStyle(fontWeight: FontWeight.w700, color: color)),
         if (father.trim().isNotEmpty)
-          Text('S/O ${father.trim()}',
+          Text('F/N ${father.trim()}',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 12, color: kMuted)),
@@ -10256,7 +10649,7 @@ class _ImportReviewScreenState extends State<ImportReviewScreen> {
                     Text(
                         rows[i].father.isEmpty
                             ? rows[i].name
-                            : '${rows[i].name}  (S/O ${rows[i].father})',
+                            : '${rows[i].name}  (F/N ${rows[i].father})',
                         style: const TextStyle(fontWeight: FontWeight.w700)),
                     DropdownButton<String?>(
                       isExpanded: true,
@@ -10271,7 +10664,7 @@ class _ImportReviewScreenState extends State<ImportReviewScreen> {
                               value: s['roll'],
                               child: Text(
                                 '${rollOf(s['roll']!)} • ${s['name']}'
-                                '${(s['father'] ?? '').isEmpty ? '' : ' (S/O ${s['father']})'}',
+                                '${(s['father'] ?? '').isEmpty ? '' : ' (F/N ${s['father']})'}',
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
@@ -12123,7 +12516,7 @@ class _StudentStatCardState extends State<StudentStatCard> {
                 ),
                 if (w.father.trim().isNotEmpty) ...[
                   const SizedBox(height: 2),
-                  Text('S/O ${w.father.trim()}',
+                  Text('F/N ${w.father.trim()}',
                       textAlign: TextAlign.center,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -12603,7 +12996,7 @@ class _AttendanceSheetScreenState extends State<AttendanceSheetScreen> {
     }
     headCells.insert(
         0,
-        _cell('Father', _fatherW,
+        _cell('Father Name', _fatherW,
             weight: FontWeight.w700, size: 12, h: _headH, bg: headBg));
     headCells.addAll([
       _cell('Total', _sumW,
