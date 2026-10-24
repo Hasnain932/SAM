@@ -12,10 +12,14 @@ import 'package:sqflite/sqflite.dart' as sql;
 import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' show Random;
 import 'dart:ui' show ImageFilter;
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:archive/archive.dart' as zip;
+import 'package:mobile_scanner/mobile_scanner.dart' as scanner;
+import 'package:pdf/pdf.dart' as pdf_lib;
+import 'package:pdf/widgets.dart' as pw;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
 import 'download_stub.dart'
@@ -55,6 +59,11 @@ void main() async {
   );
 
   await sessionReady;
+  if (AppSession.kind == 'teacher' ||
+      AppSession.kind == 'hidden' ||
+      AppSession.kind == 'student') {
+    unawaited(AppSession.ensureSignedIn());
+  }
   runApp(const AttendanceApp());
 }
 
@@ -1410,10 +1419,31 @@ void showSnack(BuildContext context, String msg, {Color? color}) {
   );
 }
 
+// Message that stays on screen until the user taps Dismiss.
+// Replaces any snackbar already showing.
+void showStickySnack(ScaffoldMessengerState messenger, String msg,
+    {Color? color}) {
+  messenger.hideCurrentSnackBar();
+  messenger.showSnackBar(
+    SnackBar(
+      content: Text(msg),
+      backgroundColor: color,
+      duration: const Duration(days: 1),
+      action: SnackBarAction(
+        label: 'Dismiss',
+        textColor: Colors.white,
+        onPressed: () => messenger.hideCurrentSnackBar(),
+      ),
+    ),
+  );
+}
+
 // Session: who is logged in (admin or teacher)
 class AppSession {
-  // kind: '' (none / Firebase admin), 'teacher', or 'hidden' (second admin)
+  // kind: '' (none / Firebase admin), 'teacher', 'hidden' (second admin) or 'student'
   static String kind = '';
+  // Logged-in student (kind == 'student'): u, dept, section, semester, roll, name
+  static Map<String, String> student = {};
   static String teacherId = '';
   static String teacherName = '';
   static bool isAdmin = false; // set by RootGate
@@ -1429,6 +1459,12 @@ class AppSession {
       kind = p.getString('session_kind') ?? '';
       teacherId = p.getString('session_teacher_id') ?? '';
       teacherName = p.getString('session_teacher_name') ?? '';
+      final sj = p.getString('session_student') ?? '';
+      if (sj.isNotEmpty) {
+        final m = jsonDecode(sj) as Map;
+        student = m.map((k, v) => MapEntry(k.toString(), v.toString()));
+      }
+      if (kind == 'student' && student.isEmpty) kind = '';
     } catch (_) {}
   }
 
@@ -1437,10 +1473,12 @@ class AppSession {
     await p.setString('session_kind', kind);
     await p.setString('session_teacher_id', teacherId);
     await p.setString('session_teacher_name', teacherName);
+    await p.setString('session_student', student.isEmpty ? '' : jsonEncode(student));
   }
 
   static Future<void> loginTeacher(String id, String name) async {
     kind = 'teacher';
+    student = {};
     teacherId = id;
     teacherName = name;
     await _save();
@@ -1451,6 +1489,7 @@ class AppSession {
 
   static Future<void> loginHiddenAdmin() async {
     kind = 'hidden';
+    student = {};
     teacherId = '';
     teacherName = '';
     await _save();
@@ -1474,6 +1513,7 @@ class AppSession {
   // Clear the old session when logging in as a Firebase admin.
   static Future<void> clearForFirebaseAdmin() async {
     kind = '';
+    student = {};
     teacherId = '';
     teacherName = '';
     try {
@@ -1496,24 +1536,55 @@ class AppSession {
   // Last sign-in failure code (for a clear message instead of a vague one).
   static String lastAuthError = '';
 
-  // Makes sure a Firebase user exists (anonymous is fine) before a write that
-  // needs request.auth != null. Never throws; returns false if sign-in failed.
-  static Future<bool> ensureSignedIn() async {
+  // Makes sure a Firebase user exists (anonymous is fine) before a read/write
+  // that needs request.auth != null. Never throws; returns false if there is no
+  // user. Offline it returns at once (no waiting), and after a failure it does
+  // not retry for 20 s, so screens never hang on a broken sign-in.
+  static Future<bool>? _signingIn;
+  static DateTime _authFailAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  static Future<bool> ensureSignedIn() {
+    if (FirebaseAuth.instance.currentUser != null) return Future.value(true);
+    return _signingIn ??= _doSignIn().whenComplete(() => _signingIn = null);
+  }
+
+  static Future<bool> _doSignIn() async {
     try {
-      if (FirebaseAuth.instance.currentUser != null) return true;
+      if (DateTime.now().difference(_authFailAt) < const Duration(seconds: 20)) {
+        return false;
+      }
+      if (!await _isOnline()) return false;
       await FirebaseAuth.instance
           .signInAnonymously()
           .timeout(const Duration(seconds: 8));
       return FirebaseAuth.instance.currentUser != null;
     } catch (e) {
+      _authFailAt = DateTime.now();
       lastAuthError = e is FirebaseException ? e.code : e.runtimeType.toString();
       debugPrint('ensureSignedIn failed: $e');
       return false;
     }
   }
 
+  static Future<void> loginStudent(Map<String, String> info) async {
+    kind = 'student';
+    student = info;
+    teacherId = '';
+    teacherName = '';
+    await _save();
+    tick.value++;
+  }
+
+  // Updates the saved student details (e.g. after the admin moved the login to
+  // the next semester) without rebuilding the whole app.
+  static Future<void> updateStudent(Map<String, String> info) async {
+    student = info;
+    await _save();
+  }
+
   static Future<void> logout() async {
     kind = '';
+    student = {};
     teacherId = '';
     teacherName = '';
     isAdmin = false;
@@ -1582,6 +1653,11 @@ class RootGate extends StatelessWidget {
             if (AppSession.kind == 'hidden') {
               AppSession.isAdmin = true;
               return const DepartmentsScreen(key: ValueKey('admin-root'));
+            }
+            if (AppSession.kind == 'student') {
+              AppSession.isAdmin = false;
+              return StudentHomeScreen(
+                  key: ValueKey('student-${AppSession.student['u']}'));
             }
             if (AppSession.kind == 'teacher') {
               AppSession.isAdmin = false;
@@ -1722,7 +1798,7 @@ class WelcomeScreen extends StatelessWidget {
             ),
           ),
         ),
-        const SizedBox(width: 10),
+        const SizedBox(width: 12),
         Expanded(
           flex: 5,
           child: Column(
@@ -1764,7 +1840,7 @@ class WelcomeScreen extends StatelessWidget {
                   radius: 18,
                 ),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 12),
               Floaty(
                 dy: 3,
                 phase: 0.75,
@@ -1809,6 +1885,10 @@ class WelcomeScreen extends StatelessWidget {
           context,
           _fadeRoute((_) => const TeacherAuthScreen()),
         );
+    void openStudent() => Navigator.push(
+          context,
+          _fadeRoute((_) => const StudentLoginScreen()),
+        );
     return Scaffold(
       body: Stack(
         children: [
@@ -1816,135 +1896,266 @@ class WelcomeScreen extends StatelessWidget {
             child: CustomPaint(painter: _BrandRingsPainter()),
           ),
           SafeArea(
-            child: Center(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(22, 14, 22, 18),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 480),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          const IconBadge(
-                              icon: Icons.school_rounded, size: 40),
-                          const SizedBox(width: 12),
-                          const Text('SAM',
-                              style: TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.w800,
-                                  letterSpacing: 6)),
-                        ],
-                      ),
-                      const SizedBox(height: 22),
-                      _hero(),
-                      const SizedBox(height: 14),
-                      Floaty(
-                        dy: 2,
-                        phase: 0.2,
-                        child: _glass(
-                          const Text('Exported to Excel',
-                              style: TextStyle(
-                                  color: kAccent,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w700)),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 14, vertical: 8),
-                          radius: 20,
-                        ),
-                      ),
-                      const SizedBox(height: 22),
-                      const Text('Attendance,',
-                          style: TextStyle(
-                              fontSize: 34,
-                              height: 1.1,
-                              fontWeight: FontWeight.w800)),
-                      ShaderMask(
-                        shaderCallback: (r) => const LinearGradient(
-                                colors: [kAccent, kViolet])
-                            .createShader(r),
-                        child: const Text('done in seconds.',
-                            style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 34,
-                                height: 1.1,
-                                fontWeight: FontWeight.w800)),
-                      ),
-                      const SizedBox(height: 10),
-                      const Text(
-                          'Smart, fast and reliable. Mark, track and export for your whole university.',
-                          style: TextStyle(color: kMuted, fontSize: 14)),
-                      const SizedBox(height: 22),
-                      SizedBox(
-                        width: double.infinity,
-                        height: 54,
-                        child: GradPill(
-                          label: 'Admin Login',
-                          onTap: openAdmin,
-                          expand: true,
-                          height: 54,
-                          radius: 18,
-                          fontSize: 16,
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      SizedBox(
-                        width: double.infinity,
-                        height: 54,
-                        child: OutlinedButton(
-                          onPressed: openTeacher,
-                          style: OutlinedButton.styleFrom(
-                            shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(18)),
-                          ),
-                          child: const Text('Teacher Login',
-                              style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w700)),
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Center(
-                        child: TextButton(
-                          onPressed: openTeacher,
-                          child: Text.rich(
-                            TextSpan(
-                              text: 'New teacher? ',
-                              style: const TextStyle(
-                                  color: kMuted,
-                                  fontWeight: FontWeight.w400),
+            // No scrolling: everything fits on one screen. On a very short
+            // phone the whole block shrinks a little (scaleDown) instead.
+            child: LayoutBuilder(
+              builder: (context, box) {
+                final inner = box.maxWidth - 44;
+                final w = inner > 480 ? 480.0 : inner;
+                return Align(
+                  alignment: Alignment.center,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(22, 8, 22, 10),
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: SizedBox(
+                        width: w,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
                               children: const [
-                                TextSpan(
-                                  text: 'Create account',
-                                  style: TextStyle(
-                                      color: kAccent,
-                                      fontWeight: FontWeight.w700),
-                                ),
+                                IconBadge(icon: Icons.school_rounded, size: 36),
+                                SizedBox(width: 12),
+                                Text('SAM',
+                                    style: TextStyle(
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.w800,
+                                        letterSpacing: 6)),
                               ],
                             ),
-                            style: const TextStyle(fontSize: 14),
-                          ),
+                            const SizedBox(height: 24),
+                            _hero(),
+                            const SizedBox(height: 18),
+                            Floaty(
+                              dy: 2,
+                              phase: 0.2,
+                              child: _glass(
+                                const Text('Exported to Excel',
+                                    style: TextStyle(
+                                        color: kAccent,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w700)),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 14, vertical: 7),
+                                radius: 20,
+                              ),
+                            ),
+                            const SizedBox(height: 26),
+                            const Text('Attendance,',
+                                style: TextStyle(
+                                    fontSize: 31,
+                                    height: 1.1,
+                                    fontWeight: FontWeight.w800)),
+                            ShaderMask(
+                              shaderCallback: (r) => const LinearGradient(
+                                      colors: [kAccent, kViolet])
+                                  .createShader(r),
+                              child: const Text('done in seconds.',
+                                  style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 31,
+                                      height: 1.1,
+                                      fontWeight: FontWeight.w800)),
+                            ),
+                            const SizedBox(height: 10),
+                            const Text(
+                                'Smart, fast and reliable. Mark, track and export for your whole university.',
+                                style: TextStyle(color: kMuted, fontSize: 13.5)),
+                            const SizedBox(height: 26),
+                            _RoleSelector(
+                              onAdmin: openAdmin,
+                              onTeacher: openTeacher,
+                              onStudent: openStudent,
+                            ),
+                            const SizedBox(height: 24),
+                            SizedBox(
+                              width: w,
+                              child: Wrap(
+                                alignment: WrapAlignment.center,
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  _chip(Icons.bolt_outlined, 'Quick marking'),
+                                  _chip(Icons.description_outlined,
+                                      'Excel export'),
+                                  _chip(Icons.cloud_off_outlined, 'Offline'),
+                                ],
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                      const SizedBox(height: 4),
-                      Wrap(
-                        alignment: WrapAlignment.center,
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          _chip(Icons.bolt_outlined, 'Quick marking'),
-                          _chip(Icons.description_outlined, 'Excel export'),
-                          _chip(Icons.cloud_off_outlined, 'Offline'),
-                        ],
-                      ),
-                    ],
+                    ),
                   ),
-                ),
-              ),
+                );
+              },
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+// Role picker for the welcome screen: Admin / Teacher / Student in one control.
+class _RoleSelector extends StatefulWidget {
+  final VoidCallback onAdmin;
+  final VoidCallback onTeacher;
+  final VoidCallback onStudent;
+  const _RoleSelector({
+    required this.onAdmin,
+    required this.onTeacher,
+    required this.onStudent,
+  });
+
+  @override
+  State<_RoleSelector> createState() => _RoleSelectorState();
+}
+
+class _RoleSelectorState extends State<_RoleSelector> {
+  int _i = 1; // Teacher is selected first
+
+  static const _names = ['Admin', 'Teacher', 'Student'];
+  static const _icons = [
+    Icons.shield_outlined,
+    Icons.co_present_outlined,
+    Icons.school_outlined,
+  ];
+  static const _desc = [
+    'Manage classes, teachers and reports',
+    'Mark attendance and export to Excel',
+    'See your attendance and subjects',
+  ];
+
+  VoidCallback get _go =>
+      [widget.onAdmin, widget.onTeacher, widget.onStudent][_i];
+
+  Widget _seg(int i) {
+    final sel = i == _i;
+    return Expanded(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          HapticFeedback.selectionClick();
+          setState(() => _i = i);
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          decoration: BoxDecoration(
+            gradient: sel ? kTileGrad : null,
+            borderRadius: BorderRadius.circular(16),
+            boxShadow: sel
+                ? [
+                    BoxShadow(
+                      color: kAccent2.withValues(alpha: 0.35),
+                      blurRadius: 10,
+                      offset: const Offset(0, 3),
+                    ),
+                  ]
+                : null,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(_icons[i], size: 21, color: sel ? Colors.white : kMuted),
+              const SizedBox(height: 4),
+              Text(
+                _names[i],
+                style: TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: sel ? FontWeight.w800 : FontWeight.w600,
+                  color: sel ? Colors.white : kMuted,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.only(left: 4, bottom: 8),
+          child: Text('CHOOSE YOUR ROLE',
+              style: TextStyle(
+                  color: kLabelBlue,
+                  fontSize: 11.5,
+                  letterSpacing: 1.4,
+                  fontWeight: FontWeight.w700)),
+        ),
+        Container(
+          padding: const EdgeInsets.all(4),
+          decoration: BoxDecoration(
+            color: const Color(0x4D0A0F2E),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: kGlassBorder),
+          ),
+          child: Row(children: [for (var i = 0; i < 3; i++) _seg(i)]),
+        ),
+        const SizedBox(height: 12),
+        AnimatedSwitcher(
+          duration: const Duration(milliseconds: 220),
+          child: Container(
+            key: ValueKey(_i),
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: kGlass,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: kGlassBorder),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    gradient: kTileGrad,
+                    borderRadius: BorderRadius.circular(13),
+                  ),
+                  child: Icon(_icons[_i], color: Colors.white, size: 22),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(_names[_i],
+                          style: const TextStyle(
+                              fontSize: 15, fontWeight: FontWeight.w800)),
+                      const SizedBox(height: 2),
+                      Text(_desc[_i],
+                          style: const TextStyle(color: kMuted, fontSize: 12.5)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 14),
+        SizedBox(
+          width: double.infinity,
+          height: 50,
+          child: GradPill(
+            label: 'Continue as ${_names[_i]}',
+            onTap: _go,
+            expand: true,
+            height: 50,
+            radius: 18,
+            fontSize: 16,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -2105,6 +2316,1938 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
   }
 }
 
+// ===== Student access (read only) =====
+// A student logs in with a username + password and can only look at their own
+// attendance. Logins live at student_logins/{USERNAME}: dept, section, semester,
+// roll, name, salt, hash. A login belongs to the whole degree: when students are
+// copied to the next semester, only its semester field moves (same ID and key). The password itself is never stored, only its salted hash.
+const String _kStudentPwChars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+
+String _randomFrom(String chars, int n) {
+  final r = Random.secure();
+  return List.generate(n, (_) => chars[r.nextInt(chars.length)]).join();
+}
+
+String _studentHash(String username, String salt, String password) =>
+    _sha256Hex('stu|$salt|$username|$password');
+
+CollectionReference<Map<String, dynamic>> get _studentLoginsRef =>
+    FirebaseFirestore.instance.collection('student_logins');
+
+// 'Computer Science' -> 'CS', 'Software' -> 'SOF'
+String deptInitials(String dept) {
+  final words = dept
+      .split(RegExp(r'[^A-Za-z0-9]+'))
+      .where((w) => w.isNotEmpty)
+      .toList();
+  if (words.isEmpty) return 'D';
+  String out;
+  if (words.length == 1) {
+    final w = words.first;
+    out = w.substring(0, w.length < 3 ? w.length : 3);
+  } else {
+    out = words.map((w) => w[0]).join();
+    if (out.length > 5) out = out.substring(0, 5);
+  }
+  return out.toUpperCase();
+}
+
+class StudentCred {
+  final String roll;
+  final String name;
+  final String username;
+  final String password;
+  const StudentCred(this.roll, this.name, this.username, this.password);
+}
+
+// Passwords made on this phone are kept in the phone's local storage only
+// (never on the server), so the PDF can be exported again for any semester.
+// Usernames stay the same for the whole degree, so username -> password works
+// for every semester.
+const _kSavedStudentPws = 'saved_student_passwords_v1';
+
+Future<Map<String, String>> loadSavedStudentPws() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_kSavedStudentPws);
+    if (raw == null || raw.isEmpty) return {};
+    final m = jsonDecode(raw) as Map<String, dynamic>;
+    return m.map((k, v) => MapEntry(k, v.toString()));
+  } catch (e) {
+    debugPrint('load saved student passwords failed: $e');
+    return {};
+  }
+}
+
+Future<void> saveStudentPws(List<StudentCred> creds) async {
+  if (creds.isEmpty) return;
+  try {
+    final all = await loadSavedStudentPws();
+    for (final c in creds) {
+      all[c.username] = c.password;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kSavedStudentPws, jsonEncode(all));
+  } catch (e) {
+    debugPrint('save student passwords failed: $e');
+  }
+}
+
+// roll -> username, for the logins that already exist in this class (server read).
+Future<Map<String, String>> loadStudentLoginNames(SemRef sem) async {
+  final snap = await _studentLoginsRef
+      .where('dept', isEqualTo: sem.deptId)
+      .where('section', isEqualTo: sem.section)
+      .where('semester', isEqualTo: sem.semester)
+      .get(const GetOptions(source: Source.server))
+      .timeout(const Duration(seconds: 12));
+  final out = <String, String>{};
+  for (final d in snap.docs) {
+    final roll = (d.data()['roll'] ?? '').toString();
+    if (roll.isNotEmpty) out[roll] = d.id;
+  }
+  return out;
+}
+
+Future<String> _pickStudentUsername(SemRef sem, String roll) async {
+  // One login for the whole degree, so the semester is not part of the username.
+  final base = '${deptInitials(sem.deptId)}-${sem.section}-$roll'
+      .toUpperCase()
+      .replaceAll(RegExp(r'[^A-Z0-9_-]'), '');
+  for (var i = 1; i <= 30; i++) {
+    final cand = i == 1 ? base : '$base-$i';
+    final d = await _studentLoginsRef
+        .doc(cand)
+        .get(const GetOptions(source: Source.server))
+        .timeout(const Duration(seconds: 12));
+    if (!d.exists) return cand;
+  }
+  throw StateError('No free username for roll $roll');
+}
+
+// Creates logins (new random password each). With [onlyRolls] it (re)sets just
+// those students; without it, it creates logins only for students that have none.
+// Needs internet. The plain passwords are returned once and never stored.
+Future<List<StudentCred>> generateStudentLogins(SemRef sem,
+    {Set<String>? onlyRolls}) async {
+  if (!await AppSession.ensureSignedIn()) {
+    throw StateError('Not signed in to the server (${AppSession.lastAuthError}).');
+  }
+  final students = await loadSemesterStudents(sem);
+  final existing = await loadStudentLoginNames(sem);
+  final targets = students.where((st) {
+    final roll = st['roll']!;
+    return onlyRolls == null
+        ? !existing.containsKey(roll)
+        : onlyRolls.contains(roll);
+  }).toList();
+
+  final out = <StudentCred>[];
+  var batch = FirebaseFirestore.instance.batch();
+  var pending = 0;
+  for (final st in targets) {
+    final roll = st['roll']!;
+    final name = st['name'] ?? '';
+    final username = existing[roll] ?? await _pickStudentUsername(sem, roll);
+    final password = _randomFrom(_kStudentPwChars, 8);
+    final salt = _randomFrom('abcdef0123456789', 12);
+    batch.set(_studentLoginsRef.doc(username), {
+      'username': username,
+      'dept': sem.deptId,
+      'section': sem.section,
+      'semester': sem.semester,
+      'roll': roll,
+      'name': name,
+      'salt': salt,
+      'hash': _studentHash(username, salt, password),
+    });
+    out.add(StudentCred(roll, name, username, password));
+    pending++;
+    if (pending >= 400) {
+      await batch.commit().timeout(const Duration(seconds: 30));
+      batch = FirebaseFirestore.instance.batch();
+      pending = 0;
+    }
+  }
+  if (pending > 0) {
+    await batch.commit().timeout(const Duration(seconds: 30));
+  }
+  return out;
+}
+
+// Moves the logins of students copied from [from] to [to]: same username and
+// password, only the semester (and the key, if it changed) is updated.
+// [keyMap] is old key -> new key. Admin only, needs internet; never throws.
+Future<int> moveStudentLogins(
+    SemRef from, SemRef to, Map<String, String> keyMap) async {
+  if (keyMap.isEmpty) return 0;
+  try {
+    if (!await AppSession.ensureSignedIn()) return 0;
+    final src = await loadStudentLoginNames(from); // roll -> username
+    final dest = await loadStudentLoginNames(to);
+    var batch = FirebaseFirestore.instance.batch();
+    var pending = 0;
+    var moved = 0;
+    for (final e in keyMap.entries) {
+      final username = src[e.key];
+      if (username == null || dest.containsKey(e.value)) continue;
+      batch.update(_studentLoginsRef.doc(username),
+          {'semester': to.semester, 'roll': e.value});
+      moved++;
+      if (++pending >= 400) {
+        await batch.commit().timeout(const Duration(seconds: 30));
+        batch = FirebaseFirestore.instance.batch();
+        pending = 0;
+      }
+    }
+    if (pending > 0) await batch.commit().timeout(const Duration(seconds: 30));
+    return moved;
+  } catch (e) {
+    debugPrint('move student logins failed: $e');
+    return 0;
+  }
+}
+
+// For students of [sem] that have no login yet: finds a login of the same
+// section in another semester (same roll and same name) and moves it here.
+// Used by the Sync button (old logins, or a copy done by a teacher).
+Future<int> adoptStudentLogins(SemRef sem, {Set<String>? alreadyMoved}) async {
+  if (!await AppSession.ensureSignedIn()) {
+    throw StateError('Not signed in to the server (${AppSession.lastAuthError}).');
+  }
+  final students = await loadSemesterStudents(sem);
+  final mine = await loadStudentLoginNames(sem);
+  final snap = await _studentLoginsRef
+      .where('dept', isEqualTo: sem.deptId)
+      .where('section', isEqualTo: sem.section)
+      .get(const GetOptions(source: Source.server))
+      .timeout(const Duration(seconds: 12));
+  String norm(String x) => x.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
+  final cands = snap.docs
+      .where((d) =>
+          (d.data()['semester'] ?? '').toString() != sem.semester &&
+          !(alreadyMoved?.contains(d.id) ?? false))
+      .toList();
+  final used = <String>{};
+  var batch = FirebaseFirestore.instance.batch();
+  var pending = 0;
+  var moved = 0;
+  for (final st in students) {
+    final key = st['roll']!;
+    if (mine.containsKey(key)) continue;
+    final name = norm(st['name'] ?? '');
+    for (final d in cands) {
+      if (used.contains(d.id)) continue;
+      final data = d.data();
+      if (rollOf((data['roll'] ?? '').toString()) != rollOf(key)) continue;
+      if (norm((data['name'] ?? '').toString()) != name) continue;
+      used.add(d.id);
+      alreadyMoved?.add(d.id);
+      batch.update(d.reference, {'semester': sem.semester, 'roll': key});
+      moved++;
+      if (++pending >= 400) {
+        await batch.commit().timeout(const Duration(seconds: 30));
+        batch = FirebaseFirestore.instance.batch();
+        pending = 0;
+      }
+      break;
+    }
+  }
+  if (pending > 0) await batch.commit().timeout(const Duration(seconds: 30));
+  return moved;
+}
+
+// Sync for every semester of the section in one go (one tap for the admin).
+Future<int> adoptStudentLoginsAllSemesters(SemRef current) async {
+  final ids = <String>{
+    ...await loadSemesterIds(current.deptId, current.section),
+    current.semester,
+  };
+  final moved = <String>{};
+  var total = 0;
+  for (final id in ids) {
+    total += await adoptStudentLogins(
+        SemRef(current.deptId, current.section, id),
+        alreadyMoved: moved);
+  }
+  return total;
+}
+
+// Sync for EVERY department, section and semester in one go (admin).
+Future<int> adoptStudentLoginsEverywhere() async {
+  var total = 0;
+  final depts = await _safeQuery(
+      FirebaseFirestore.instance.collection('departments'));
+  for (final d in depts.docs) {
+    if (d.id == kHiddenAdminDeptName) continue;
+    for (final sec in sectionsFrom(d.data())) {
+      try {
+        final moved = <String>{};
+        for (final id in await loadSemesterIds(d.id, sec)) {
+          total += await adoptStudentLogins(SemRef(d.id, sec, id),
+              alreadyMoved: moved);
+        }
+      } catch (e) {
+        debugPrint('sync ${d.id}/$sec failed: $e');
+      }
+    }
+  }
+  return total;
+}
+
+// Deletes the logins (ID and key) of the given students of [sem]. Admin only.
+Future<int> deleteStudentLoginsFor(SemRef sem, Set<String> keys) async {
+  if (keys.isEmpty || !AppSession.isAdmin) return 0;
+  if (!await AppSession.ensureSignedIn()) return 0;
+  final logins = await loadStudentLoginNames(sem);
+  var batch = FirebaseFirestore.instance.batch();
+  var pending = 0;
+  var n = 0;
+  for (final k in keys) {
+    final username = logins[k];
+    if (username == null) continue;
+    batch.delete(_studentLoginsRef.doc(username));
+    n++;
+    if (++pending >= 400) {
+      await batch.commit().timeout(const Duration(seconds: 30));
+      batch = FirebaseFirestore.instance.batch();
+      pending = 0;
+    }
+  }
+  if (pending > 0) await batch.commit().timeout(const Duration(seconds: 30));
+  return n;
+}
+
+// ---- QR code on the student card ----
+// The QR holds 'SAM1|USERNAME|PASSWORD' (the same details as the printed text),
+// so the card must be kept private, just like the password itself.
+const String kStudentQrTag = 'SAM1';
+
+String studentQrPayload(String username, String password) =>
+    '$kStudentQrTag|$username|$password';
+
+// Returns (username, password), or null when the text is not a SAM card QR.
+(String, String)? parseStudentQr(String raw) {
+  final parts = raw.trim().split('|');
+  if (parts.length != 3 || parts[0] != kStudentQrTag) return null;
+  final username = parts[1].trim().toUpperCase();
+  final password = parts[2].trim().toUpperCase();
+  if (!RegExp(r'^[A-Z0-9_-]+$').hasMatch(username)) return null;
+  if (!RegExp(r'^[A-Z0-9]+$').hasMatch(password)) return null;
+  return (username, password);
+}
+
+// ---- Student login screen ----
+class StudentLoginScreen extends StatefulWidget {
+  const StudentLoginScreen({super.key});
+
+  @override
+  State<StudentLoginScreen> createState() => _StudentLoginScreenState();
+}
+
+class _StudentLoginScreenState extends State<StudentLoginScreen> {
+  final _userC = TextEditingController();
+  final _passC = TextEditingController();
+  bool _busy = false;
+  bool _obscure = true;
+  String? _error;
+
+  @override
+  void dispose() {
+    _userC.dispose();
+    _passC.dispose();
+    super.dispose();
+  }
+
+  void _fail(String msg) {
+    if (mounted) setState(() => _error = msg);
+  }
+
+  // Typed login: reads the two fields.
+  Future<void> _submit() => _login(
+        _userC.text.trim().toUpperCase(),
+        _passC.text.trim().toUpperCase(),
+      );
+
+  // QR login: opens the camera, reads the card's QR code, then logs in with it.
+  Future<void> _scanQr() async {
+    if (_busy) return;
+    final code = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (_) => const StudentQrScanScreen()),
+    );
+    if (code == null || !mounted) return;
+    final cred = parseStudentQr(code);
+    if (cred == null) {
+      _fail('This QR code is not a SAM student card.');
+      return;
+    }
+    // Fill the fields too, so the student can retry by hand if needed.
+    _userC.text = cred.$1;
+    _passC.text = cred.$2;
+    await _login(cred.$1, cred.$2);
+  }
+
+  // Shared by the typed login and the QR login.
+  Future<void> _login(String username, String password) async {
+    if (_busy) return;
+    if (username.isEmpty || password.isEmpty) {
+      _fail('Please fill in all fields');
+      return;
+    }
+    const wrong = 'Incorrect username or password';
+    if (!RegExp(r'^[A-Z0-9_-]+$').hasMatch(username)) {
+      _fail(wrong);
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      if (!await _isOnline()) {
+        _fail('Internet is required to log in.');
+        return;
+      }
+      if (!await AppSession.ensureSignedIn()) {
+        _fail(
+            'Could not connect to the server (${AppSession.lastAuthError}). Please try again.');
+        return;
+      }
+      final snap = await _studentLoginsRef
+          .doc(username)
+          .get(const GetOptions(source: Source.server))
+          .timeout(const Duration(seconds: 12));
+      final data = snap.data();
+      if (!snap.exists || data == null) {
+        _fail(wrong);
+        return;
+      }
+      final salt = (data['salt'] ?? '').toString();
+      if (_studentHash(username, salt, password) !=
+          (data['hash'] ?? '').toString()) {
+        _fail(wrong);
+        return;
+      }
+      await AppSession.loginStudent({
+        'u': username,
+        'dept': (data['dept'] ?? '').toString(),
+        'section': (data['section'] ?? '').toString(),
+        'semester': (data['semester'] ?? '').toString(),
+        'roll': (data['roll'] ?? '').toString(),
+        'name': (data['name'] ?? '').toString(),
+      });
+      if (mounted) Navigator.of(context).popUntil((r) => r.isFirst);
+    } on FirebaseException catch (e) {
+      debugPrint('student login failed: ${e.code}');
+      _fail(e.code == 'permission-denied'
+          ? 'The server refused the request. Please try again later.'
+          : 'Could not reach the server. Please check your internet and try again.');
+    } on TimeoutException {
+      _fail('The server took too long. Please check your internet and try again.');
+    } catch (e) {
+      debugPrint('student login failed: $e');
+      _fail('Something went wrong. Please try again.');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AuthShell(
+      icon: Icons.school_outlined,
+      title: 'Student Login',
+      subtitle: 'See your attendance',
+      children: [
+        AuthField(
+          label: 'Username',
+          hint: 'e.g. CS-A-3-15',
+          icon: Icons.person_outline,
+          controller: _userC,
+          capitalization: TextCapitalization.characters,
+        ),
+        const SizedBox(height: 14),
+        AuthField(
+          label: 'Password',
+          hint: 'Enter your password',
+          icon: Icons.lock_outline,
+          controller: _passC,
+          obscure: _obscure,
+          onToggleObscure: () => setState(() => _obscure = !_obscure),
+        ),
+        const SizedBox(height: 16),
+        if (_error != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Text(_error!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: kAbsent)),
+          ),
+        GradientButton(
+          label: 'Login',
+          loading: _busy,
+          onPressed: _busy ? null : _submit,
+        ),
+        const SizedBox(height: 12),
+        GradPill(
+          label: 'Scan QR code',
+          icon: Icons.qr_code_scanner,
+          filled: false,
+          enabled: !_busy,
+          expand: true,
+          height: 48,
+          radius: 26,
+          onTap: _busy ? null : _scanQr,
+        ),
+      ],
+    );
+  }
+}
+
+// ---- Student QR scanner: returns the scanned text, or nothing if closed ----
+class StudentQrScanScreen extends StatefulWidget {
+  const StudentQrScanScreen({super.key});
+
+  @override
+  State<StudentQrScanScreen> createState() => _StudentQrScanScreenState();
+}
+
+class _StudentQrScanScreenState extends State<StudentQrScanScreen> {
+  final scanner.MobileScannerController _controller =
+      scanner.MobileScannerController(
+    formats: const [scanner.BarcodeFormat.qrCode],
+    detectionSpeed: scanner.DetectionSpeed.noDuplicates,
+  );
+  bool _done = false;
+
+  void _onDetect(scanner.BarcodeCapture capture) {
+    if (_done || !mounted) return;
+    for (final b in capture.barcodes) {
+      final v = b.rawValue;
+      if (v != null && v.trim().isNotEmpty) {
+        _done = true; // only the first code is used
+        Navigator.of(context).pop(v.trim());
+        return;
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    super.dispose();
+    unawaited(_controller.dispose());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Scan your card')),
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: scanner.MobileScanner(
+              controller: _controller,
+              onDetect: _onDetect,
+            ),
+          ),
+          Center(
+            child: IgnorePointer(
+              child: Container(
+                width: 240,
+                height: 240,
+                decoration: BoxDecoration(
+                  border: Border.all(color: kAccent, width: 3),
+                  borderRadius: BorderRadius.circular(24),
+                ),
+              ),
+            ),
+          ),
+          const Positioned(
+            left: 24,
+            right: 24,
+            bottom: 48,
+            child: Text(
+              'Point the camera at the QR code on your SAM card.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 15,
+                shadows: [Shadow(color: Colors.black87, blurRadius: 6)],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---- Student home: own attendance, read only ----
+class _SubjAtt {
+  final String name;
+  final int present;
+  final int absent;
+  final int total;
+  final List<StatEntry> entries;
+  final bool failed;
+  const _SubjAtt(this.name, this.present, this.absent, this.total, this.entries,
+      {this.failed = false});
+}
+
+class StudentHomeScreen extends StatefulWidget {
+  const StudentHomeScreen({super.key});
+
+  @override
+  State<StudentHomeScreen> createState() => _StudentHomeScreenState();
+}
+
+class _StudentHomeScreenState extends State<StudentHomeScreen> {
+  bool _loading = true;
+  String? _error;
+  String _name = '';
+  List<_SubjAtt> _subs = [];
+
+  Map<String, String> get _me => AppSession.student;
+  SemRef get _sem =>
+      SemRef(_me['dept'] ?? '', _me['section'] ?? '', _me['semester'] ?? '');
+
+  @override
+  void initState() {
+    super.initState();
+    _name = _me['name'] ?? '';
+    _load();
+  }
+
+  String _label(DateRecord r) =>
+      '${prettySession(r.id)}${r.isLab ? ' · Lab' : ''}';
+
+  Future<_SubjAtt> _loadSubject(SemRef sem, String name, String roll) async {
+    try {
+      final recs = await loadDateRecords(sem, name);
+      var p = 0, a = 0;
+      final entries = <StatEntry>[];
+      for (final r in recs) {
+        final st = r.status[roll];
+        if (st == 'P') {
+          p++;
+          entries.add(StatEntry(_label(r), true));
+        } else if (st == 'A') {
+          a++;
+          entries.add(StatEntry(_label(r), false));
+        }
+      }
+      return _SubjAtt(name, p, a, recs.length, entries.reversed.toList());
+    } catch (_) {
+      return _SubjAtt(name, 0, 0, 0, const [], failed: true);
+    }
+  }
+
+  bool _syncedOk = false;
+
+  // The login is for the whole degree: the admin moves it to the next semester
+  // when students are copied. Read it again so the student sees the new semester.
+  // Returns false when the login was deleted (the student is logged out).
+  Future<bool> _syncLogin() async {
+    final u = _me['u'] ?? '';
+    if (u.isEmpty) return true;
+    try {
+      final snap = await _studentLoginsRef
+          .doc(u)
+          .get(const GetOptions(source: Source.server))
+          .timeout(const Duration(seconds: 8));
+      _syncedOk = true;
+      if (!snap.exists) {
+        await AppSession.logout();
+        return false;
+      }
+      final d = snap.data() ?? {};
+      final fresh = <String, String>{
+        'u': u,
+        'dept': (d['dept'] ?? '').toString(),
+        'section': (d['section'] ?? '').toString(),
+        'semester': (d['semester'] ?? '').toString(),
+        'roll': (d['roll'] ?? '').toString(),
+        'name': (d['name'] ?? '').toString(),
+      };
+      var changed = false;
+      for (final e in fresh.entries) {
+        if (e.value.isNotEmpty && _me[e.key] != e.value) changed = true;
+      }
+      if (changed) {
+        await AppSession.updateStudent(fresh);
+        _name = fresh['name'] ?? _name;
+      }
+    } catch (_) {
+      // Offline or slow: keep the saved details.
+    }
+    return true;
+  }
+
+  // The server read of the login happens at most once a day (or on pull-to-refresh).
+  Future<bool> _syncLoginDaily(bool force) async {
+    final key = 'login_sync|${_me['u'] ?? ''}';
+    SharedPreferences? p;
+    try {
+      p = await SharedPreferences.getInstance();
+      final age = DateTime.now().millisecondsSinceEpoch - (p.getInt(key) ?? 0);
+      if (!force && age >= 0 && age < 24 * 3600 * 1000) return true;
+    } catch (_) {}
+    _syncedOk = false;
+    final ok = await _syncLogin();
+    if (ok && _syncedOk) {
+      try {
+        await p?.setInt(key, DateTime.now().millisecondsSinceEpoch);
+      } catch (_) {}
+    }
+    return ok;
+  }
+
+  // ---- 6 hour phone cache of the finished result (pull-to-refresh bypasses it) ----
+  static const int _kCacheMinutes = 360;
+  String get _cacheKey =>
+      'att_cache|${_me['u']}|${_me['dept']}|${_me['section']}|${_me['semester']}|${_me['roll']}';
+
+  List<StatEntry> _entriesFrom(List raw) => [
+        for (final x in raw)
+          if (x is String && x.length > 2) StatEntry(x.substring(2), x[0] == 'P')
+      ];
+
+  Future<bool> _loadFromCache() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final raw = p.getString(_cacheKey);
+      if (raw == null) return false;
+      final m = jsonDecode(raw) as Map<String, dynamic>;
+      final age = DateTime.now().millisecondsSinceEpoch - (m['ts'] as int);
+      if (age < 0 || age > _kCacheMinutes * 60 * 1000) return false;
+      final list = <_SubjAtt>[];
+      for (final x in (m['subs'] as List)) {
+        final e = x as Map<String, dynamic>;
+        list.add(_SubjAtt(
+            e['n'] as String,
+            e['p'] as int,
+            e['a'] as int,
+            e['t'] as int,
+            _entriesFrom(e['e'] as List)));
+      }
+      _subs = list;
+      final nm = (m['name'] ?? '').toString();
+      if (nm.isNotEmpty) _name = nm;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _saveCache(List<_SubjAtt> list) async {
+    if (list.any((e) => e.failed)) return;
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString(
+          _cacheKey,
+          jsonEncode({
+            'ts': DateTime.now().millisecondsSinceEpoch,
+            'name': _name,
+            'subs': [
+              for (final e in list)
+                {
+                  'n': e.name,
+                  'p': e.present,
+                  'a': e.absent,
+                  't': e.total,
+                  'e': [
+                    for (final x in e.entries)
+                      '${x.present ? 'P' : 'A'}|${x.label}'
+                  ],
+                }
+            ],
+          }));
+    } catch (_) {}
+  }
+
+  _SubjAtt _fromSummary(String name, Map s) {
+    int i(Object? v) => v is num ? v.toInt() : 0;
+    final raw = s['e'] is List ? List.from(s['e'] as List) : <dynamic>[];
+    return _SubjAtt(name, i(s['p']), i(s['a']), i(s['t']),
+        _entriesFrom(raw).reversed.toList());
+  }
+
+  Future<void> _load({bool force = false}) async {
+    if (!force && await _loadFromCache()) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = null;
+        });
+      }
+      return;
+    }
+    if (!await _syncLoginDaily(force) || !mounted) return;
+    final roll = _me['roll'] ?? '';
+    if (roll.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = 'Your login is incomplete. Please log out and log in again.';
+        });
+      }
+      return;
+    }
+    try {
+      final sem = _sem;
+      final me = await safeGetDocOrNull(sem.students.doc(roll));
+      if (me != null && me.exists) {
+        _name = (me.data()?['name'] ?? _name).toString();
+      } else if (me != null && !me.metadata.isFromCache) {
+        if (mounted) {
+          setState(() {
+            _loading = false;
+            _error = 'Your record was not found. Please contact the admin.';
+          });
+        }
+        return;
+      }
+      final subRes = await _safeQuery(sem.subjects);
+      final names = subRes.docs.map((d) => d.id).toList()
+        ..sort((x, y) => x.toLowerCase().compareTo(y.toLowerCase()));
+
+      // The one summary document of this student (1 read).
+      var sums = <String, dynamic>{};
+      try {
+        final sd = await safeGetDocOrNull(summaryRef(sem, roll));
+        final m = sd?.data()?['subjects'];
+        if (m is Map) sums = Map<String, dynamic>.from(m);
+      } catch (_) {}
+
+      final list = <_SubjAtt>[];
+      final futures = names.map((n) async {
+        final sm = sums[n];
+        if (sm is Map) return _fromSummary(n, sm);
+        // Not in the summary yet: old way for this subject only.
+        try {
+          final ov = await loadOverrides(sem, n);
+          if (ov[roll]?['kind'] == 'hidden') return null; // not in this subject
+        } catch (_) {}
+        return _loadSubject(sem, n, roll);
+      }).toList();
+      for (final r in await Future.wait(futures)) {
+        if (r != null) list.add(r);
+      }
+      if (!mounted) return;
+      setState(() {
+        _subs = list;
+        _loading = false;
+        _error = null;
+      });
+      unawaited(_saveCache(list));
+    } catch (e) {
+      debugPrint('student load failed: $e');
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'Could not load your attendance. Please check your internet and try again.';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final sem = _sem;
+    final totalP = _subs.fold<int>(0, (a, e) => a + e.present);
+    final totalA = _subs.fold<int>(0, (a, e) => a + e.absent);
+    final totalAll = _subs.fold<int>(0, (a, e) => a + e.total);
+
+    Widget body;
+    if (_loading) {
+      body = const Center(child: CircularProgressIndicator());
+    } else if (_error != null) {
+      body = ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(24),
+        children: [
+          const SizedBox(height: 40),
+          Text(_error!,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: kAbsent, fontSize: 15)),
+          const SizedBox(height: 16),
+          Center(
+            child: TextButton(
+              onPressed: () {
+                setState(() => _loading = true);
+                _load(force: true);
+              },
+              child: const Text('Try again'),
+            ),
+          ),
+        ],
+      );
+    } else {
+      body = RefreshIndicator(
+        onRefresh: () => _load(force: true),
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.only(top: 4, bottom: 20),
+          children: [
+            _OverallHero(present: totalP, absent: totalA, total: totalAll),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(18, 8, 16, 2),
+              child: Text('SUBJECTS',
+                  style: TextStyle(
+                      color: kMuted,
+                      fontSize: 12,
+                      letterSpacing: 1.2,
+                      fontWeight: FontWeight.w700)),
+            ),
+            if (_subs.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(24),
+                child: Text('No subjects yet.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: kMuted)),
+              ),
+            for (var i = 0; i < _subs.length; i++)
+              _AttCard(
+                key: ValueKey(_subs[i].name),
+                index: i,
+                title: _subs[i].name,
+                present: _subs[i].present,
+                absent: _subs[i].absent,
+                total: _subs[i].total,
+                entries: _subs[i].entries,
+                failed: _subs[i].failed,
+              ),
+          ],
+        ),
+      );
+    }
+
+    return Scaffold(
+      appBar: headerAppBar(
+        title: _name.isEmpty ? 'Student' : _name,
+        subtitle:
+            'Roll ${rollOf(_me['roll'] ?? '')} • ${defaultSemesterLabel(sem.semester)} • Section ${sem.section}',
+        actions: [
+          HeaderTile(
+            icon: Icons.logout,
+            tooltip: 'Log out',
+            onTap: () => confirmAndLogout(context),
+          ),
+        ],
+      ),
+      body: body,
+    );
+  }
+}
+
+// ---- Student home widgets: overall hero + subject cards ----
+const double _kPi = 3.141592653589793;
+const double _kNeed = 75; // minimum attendance percent
+
+IconData _subjectIcon(String name) {
+  final n = name.toLowerCase();
+  if (n.contains('calc') || n.contains('math') || n.contains('algebra')) {
+    return Icons.functions_rounded;
+  }
+  if (n.contains('data structure') || n.contains('algorithm')) {
+    return Icons.account_tree_rounded;
+  }
+  if (n.contains('database') || n.contains('sql')) {
+    return Icons.storage_rounded;
+  }
+  if (n.contains('program') || n.contains('code') || n.contains('software')) {
+    return Icons.code_rounded;
+  }
+  if (n.contains('network')) return Icons.hub_rounded;
+  if (n.contains('physics') || n.contains('science')) {
+    return Icons.science_rounded;
+  }
+  if (n.contains('english') || n.contains('comm')) {
+    return Icons.menu_book_rounded;
+  }
+  return Icons.auto_stories_rounded;
+}
+
+// Accent colors for subject cards (all from the app palette).
+const List<Color> _kSubjectColors = [
+  kAccent,
+  kViolet,
+  kLabelBlue,
+  Color(0xFF5B8CFF),
+];
+
+class _RingPainter extends CustomPainter {
+  final double progress; // 0..1
+  final bool good;
+  const _RingPainter(this.progress, this.good);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const stroke = 9.0;
+    final c = Offset(size.width / 2, size.height / 2);
+    final r = (size.width - stroke) / 2;
+    final rect = Rect.fromCircle(center: c, radius: r);
+    final track = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = stroke
+      ..color = const Color(0x26FFFFFF);
+    canvas.drawCircle(c, r, track);
+    if (progress <= 0) return;
+    final colors = good
+        ? const [kAccent2, kAccent, kAccent2]
+        : const [kAbsent2, kAbsent, kAbsent2];
+    final arc = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = stroke
+      ..strokeCap = StrokeCap.round
+      ..shader = SweepGradient(
+        colors: colors,
+        transform: const GradientRotation(-_kPi / 2),
+      ).createShader(rect);
+    canvas.drawArc(rect, -_kPi / 2, 2 * _kPi * progress.clamp(0.0, 1.0).toDouble(),
+        false, arc);
+  }
+
+  @override
+  bool shouldRepaint(_RingPainter o) =>
+      o.progress != progress || o.good != good;
+}
+
+// Big "Overall" card: animated ring, three stats and a status banner.
+class _OverallHero extends StatelessWidget {
+  final int present;
+  final int absent;
+  final int total;
+  const _OverallHero(
+      {required this.present, required this.absent, required this.total});
+
+  Widget _stat(String label, int value, Color bg, Color fg) {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: bg.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(label,
+                style: const TextStyle(color: kMuted, fontSize: 12)),
+          ),
+          Text('$value',
+              style: TextStyle(
+                  color: fg, fontSize: 16, fontWeight: FontWeight.w800)),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final pct = total > 0 ? present / total * 100 : 0.0;
+    final good = total == 0 || pct >= _kNeed;
+    String msg;
+    IconData icon;
+    if (total == 0) {
+      msg = 'No classes recorded yet';
+      icon = Icons.hourglass_empty_rounded;
+    } else if (absent == 0) {
+      msg = 'Perfect record. Keep it going';
+      icon = Icons.local_fire_department_rounded;
+    } else if (good) {
+      msg = "You're on track. Keep attending";
+      icon = Icons.verified_rounded;
+    } else {
+      msg = 'Below ${_kNeed.toStringAsFixed(0)}%. Attend regularly';
+      icon = Icons.warning_amber_rounded;
+    }
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: kGlass,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(
+            color: good ? kGlassBorder : kAbsent.withValues(alpha: 0.5)),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              SizedBox(
+                width: 104,
+                height: 104,
+                child: TweenAnimationBuilder<double>(
+                  tween: Tween(begin: 0, end: pct),
+                  duration: const Duration(milliseconds: 900),
+                  curve: Curves.easeOutCubic,
+                  builder: (context, v, _) => CustomPaint(
+                    painter: _RingPainter(v / 100, good),
+                    child: Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text('${v.toStringAsFixed(v >= 99.95 ? 0 : 1)}%',
+                              style: const TextStyle(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w800,
+                                  shadows: kGlowText)),
+                          const Text('Overall',
+                              style: TextStyle(color: kMuted, fontSize: 11.5)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  children: [
+                    _stat('Present', present, kPresent, kPresent),
+                    _stat('Absent', absent, kAbsent, kAbsent),
+                    _stat('Sessions', total, Colors.white, Colors.white),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+            decoration: BoxDecoration(
+              gradient: good ? kBlueGrad : kRedGrad,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Row(
+              children: [
+                Icon(icon, color: Colors.white, size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(msg,
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700)),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// One read-only subject card.
+class _AttCard extends StatefulWidget {
+  final String title;
+  final int present;
+  final int absent;
+  final int total;
+  final List<StatEntry> entries;
+  final bool failed;
+  final int index;
+  const _AttCard({
+    super.key,
+    required this.title,
+    required this.present,
+    required this.absent,
+    required this.total,
+    required this.entries,
+    this.failed = false,
+    this.index = 0,
+  });
+
+  @override
+  State<_AttCard> createState() => _AttCardState();
+}
+
+class _AttCardState extends State<_AttCard> {
+  bool _open = false;
+
+  // How many classes can still be missed (or must be attended) at 75%.
+  String? _hint(bool good) {
+    final p = widget.present, t = widget.total;
+    if (t == 0) return null;
+    if (good) {
+      final x = (p / (_kNeed / 100) - t).floor();
+      if (x <= 0) return 'Do not miss the next class';
+      return 'Can miss $x more ${x == 1 ? 'class' : 'classes'}';
+    }
+    final int y = (3 * t - 4 * p).clamp(1, 100000).toInt();
+    return 'Attend next $y ${y == 1 ? 'class' : 'classes'} to reach 75%';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final w = widget;
+    final pct = w.total > 0 ? (w.present / w.total) * 100 : 0.0;
+    final good = w.total == 0 || pct >= _kNeed;
+    final accent = good
+        ? _kSubjectColors[w.index % _kSubjectColors.length]
+        : kAbsent;
+    final hint = _hint(good);
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+      decoration: BoxDecoration(
+        color: good ? kGlass : kAbsent.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+            color: good ? kGlassBorder : kAbsent.withValues(alpha: 0.5)),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(20),
+          onTap:
+              w.entries.isEmpty ? null : () => setState(() => _open = !_open),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 11, 12, 9),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: accent.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Icon(_subjectIcon(w.title),
+                          color: accent, size: 20),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(w.title,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  fontSize: 14, fontWeight: FontWeight.w800)),
+                          const SizedBox(height: 1),
+                          Text(
+                            w.failed
+                                ? 'Could not load. Pull down to refresh.'
+                                : w.total == 0
+                                    ? 'No classes recorded yet'
+                                    : '${w.present} of ${w.total} classes attended',
+                            style: TextStyle(
+                                color: w.failed ? kAbsent : kMuted,
+                                fontSize: 12),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (!w.failed && w.total > 0) ...[
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          gradient: good ? kBlueGrad : kRedGrad,
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text('${pct.toStringAsFixed(pct == 100 ? 0 : 1)}%',
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 12.5)),
+                      ),
+                    ],
+                  ],
+                ),
+                if (!w.failed && w.total > 0) ...[
+                  const SizedBox(height: 9),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: TweenAnimationBuilder<double>(
+                      tween: Tween(begin: 0.0, end: (pct / 100).clamp(0.0, 1.0).toDouble()),
+                      duration: const Duration(milliseconds: 700),
+                      curve: Curves.easeOutCubic,
+                      builder: (context, v, _) => LinearProgressIndicator(
+                        value: v,
+                        minHeight: 6,
+                        backgroundColor: const Color(0x26FFFFFF),
+                        color: accent,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 7),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(hint ?? '',
+                            style: TextStyle(
+                                color: good ? kLabelBlue : kAbsent,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600)),
+                      ),
+                      if (w.absent > 0)
+                        Container(
+                          margin: const EdgeInsets.only(left: 8),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: kAbsent.withValues(alpha: 0.18),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text('${w.absent} absent',
+                              style: const TextStyle(
+                                  color: kAbsent,
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w700)),
+                        ),
+                      if (w.entries.isNotEmpty)
+                        Icon(
+                          _open
+                              ? Icons.keyboard_arrow_up
+                              : Icons.keyboard_arrow_down,
+                          color: kMuted,
+                          size: 20,
+                        ),
+                    ],
+                  ),
+                ],
+                if (_open)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final e in w.entries)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: (e.present ? kPresent : kAbsent)
+                                  .withValues(alpha: 0.18),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              '${e.label} · ${e.present ? 'P' : 'A'}',
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w600,
+                                color: e.present ? kPresent : kAbsent,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---- PDF: student login cards and a class list ----
+// The built-in PDF fonts only know basic Latin letters, so any other
+// character is printed as '?' instead of leaving a blank box.
+String _pdfSafe(String s) {
+  final fixed = s
+      .replaceAll('‘', "'")
+      .replaceAll('’', "'")
+      .replaceAll('–', '-')
+      .replaceAll('—', '-');
+  final b = StringBuffer();
+  for (final r in fixed.runes) {
+    b.writeCharCode(r <= 255 ? r : 63);
+  }
+  return b.toString();
+}
+
+// One card per student, two cards per row (about 10 cards on an A4 page).
+Future<Uint8List> buildStudentCardsPdf({
+  required String className,
+  required List<StudentCred> creds,
+}) async {
+  final navy = pdf_lib.PdfColor.fromHex('#1F3864');
+  final grey = pdf_lib.PdfColor.fromHex('#5A6478');
+  final mono = pw.Font.courierBold();
+
+  pw.Widget line(String label, String value) {
+    return pw.Padding(
+      padding: const pw.EdgeInsets.only(top: 3),
+      child: pw.Row(
+        children: [
+          pw.SizedBox(
+            width: 58,
+            child: pw.Text(label,
+                style: pw.TextStyle(fontSize: 9, color: grey)),
+          ),
+          pw.Text(value, style: pw.TextStyle(fontSize: 11.5, font: mono)),
+        ],
+      ),
+    );
+  }
+
+  pw.Widget card(StudentCred c) {
+    return pw.Container(
+      width: 260,
+      padding: const pw.EdgeInsets.all(10),
+      decoration: pw.BoxDecoration(
+        border: pw.Border.all(color: navy, width: 1),
+        borderRadius: const pw.BorderRadius.all(pw.Radius.circular(8)),
+      ),
+      child: pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.Text('University of Swabi',
+              style: pw.TextStyle(
+                  fontSize: 12, fontWeight: pw.FontWeight.bold, color: navy)),
+          pw.Text('SAM - Smart Attendance',
+              style: pw.TextStyle(fontSize: 8, color: grey)),
+          pw.SizedBox(height: 4),
+          pw.Divider(color: navy, thickness: 0.6, height: 6),
+          pw.Text(_pdfSafe(c.name),
+              maxLines: 2,
+              style:
+                  pw.TextStyle(fontSize: 11, fontWeight: pw.FontWeight.bold)),
+          pw.Text('Roll ${rollOf(c.roll)}',
+              style: pw.TextStyle(fontSize: 9, color: grey)),
+          pw.Text(className, style: pw.TextStyle(fontSize: 8, color: grey)),
+          pw.SizedBox(height: 4),
+          line('Username', c.username),
+          line('Password', c.password),
+          pw.SizedBox(height: 6),
+          pw.Row(
+            crossAxisAlignment: pw.CrossAxisAlignment.center,
+            children: [
+              pw.Expanded(
+                child: pw.Text(
+                    'Open the SAM app and tap Student Login. Enter these details, or tap Scan QR code and scan the code on the right.',
+                    style: pw.TextStyle(fontSize: 7.5, color: grey)),
+              ),
+              pw.SizedBox(width: 8),
+              pw.BarcodeWidget(
+                barcode: pw.Barcode.qrCode(),
+                data: studentQrPayload(c.username, c.password),
+                width: 70,
+                height: 70,
+                padding: const pw.EdgeInsets.all(3),
+                backgroundColor: pdf_lib.PdfColors.white,
+                drawText: false,
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  final doc = pw.Document();
+  doc.addPage(pw.MultiPage(
+    pageFormat: pdf_lib.PdfPageFormat.a4,
+    margin: const pw.EdgeInsets.all(28),
+    build: (ctx) => [
+      pw.Wrap(
+        spacing: 12,
+        runSpacing: 12,
+        children: [for (final c in creds) card(c)],
+      ),
+    ],
+  ));
+  return doc.save();
+}
+
+// One table for the whole class (roll, name, username, password).
+Future<Uint8List> buildStudentListPdf({
+  required String className,
+  required List<StudentCred> creds,
+}) async {
+  final navy = pdf_lib.PdfColor.fromHex('#1F3864');
+  final grey = pdf_lib.PdfColor.fromHex('#5A6478');
+  final mono = pw.Font.courierBold();
+
+  pw.Widget cell(String t,
+      {bool head = false, pw.Font? font, pw.TextAlign? align}) {
+    return pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(horizontal: 5, vertical: 4),
+      child: pw.Text(
+        t,
+        textAlign: align,
+        style: pw.TextStyle(
+          fontSize: head ? 9.5 : 10,
+          font: font,
+          fontWeight: (head && font == null) ? pw.FontWeight.bold : null,
+          color: head ? pdf_lib.PdfColors.white : pdf_lib.PdfColors.black,
+        ),
+      ),
+    );
+  }
+
+  final rows = <pw.TableRow>[
+    pw.TableRow(
+      repeat: true,
+      decoration: pw.BoxDecoration(color: navy),
+      children: [
+        cell('Roll', head: true, align: pw.TextAlign.center),
+        cell('Name', head: true),
+        cell('Username', head: true),
+        cell('Password', head: true),
+      ],
+    ),
+    for (final c in creds)
+      pw.TableRow(
+        children: [
+          cell(rollOf(c.roll), align: pw.TextAlign.center),
+          cell(_pdfSafe(c.name)),
+          cell(c.username, font: mono),
+          cell(c.password, font: mono),
+        ],
+      ),
+  ];
+
+  final doc = pw.Document();
+  doc.addPage(pw.MultiPage(
+    pageFormat: pdf_lib.PdfPageFormat.a4,
+    margin: const pw.EdgeInsets.all(28),
+    build: (ctx) => [
+      pw.Text('University of Swabi',
+          style: pw.TextStyle(
+              fontSize: 16, fontWeight: pw.FontWeight.bold, color: navy)),
+      pw.SizedBox(height: 2),
+      pw.Text('Student logins  |  $className',
+          style: pw.TextStyle(fontSize: 10, color: grey)),
+      pw.SizedBox(height: 10),
+      pw.Table(
+        border: pw.TableBorder.all(color: pdf_lib.PdfColors.grey500, width: 0.5),
+        columnWidths: {
+          0: const pw.FixedColumnWidth(36),
+          1: const pw.FlexColumnWidth(3),
+          2: const pw.FlexColumnWidth(2.4),
+          3: const pw.FlexColumnWidth(1.6),
+        },
+        children: rows,
+      ),
+    ],
+    footer: (ctx) => pw.Center(
+      child: pw.Text('Keep this list private  -  page ${ctx.pageNumber}/${ctx.pagesCount}',
+          style: pw.TextStyle(fontSize: 8, color: grey)),
+    ),
+  ));
+  return doc.save();
+}
+
+// ---- Admin: create / reset student logins for one class ----
+class StudentLoginsScreen extends StatefulWidget {
+  final SemRef sem;
+  final String semLabel;
+  final String deptName;
+  const StudentLoginsScreen(
+      {super.key,
+      required this.sem,
+      required this.semLabel,
+      this.deptName = ''});
+
+  @override
+  State<StudentLoginsScreen> createState() => _StudentLoginsScreenState();
+}
+
+class _StudentLoginsScreenState extends State<StudentLoginsScreen> {
+  bool _loading = true;
+  bool _busy = false;
+  bool _autoSynced = false;
+  String? _error;
+  List<Map<String, String>> _students = [];
+  Map<String, String> _logins = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final st = await loadSemesterStudents(widget.sem);
+      var lg = await loadStudentLoginNames(widget.sem);
+      // Auto sync (this section only): if some students have no login here,
+      // look for their old login in another semester and move it. Quiet, once
+      // per opening of this screen.
+      if (!_autoSynced && st.any((x) => !lg.containsKey(x['roll']))) {
+        _autoSynced = true;
+        try {
+          if (await adoptStudentLoginsAllSemesters(widget.sem) > 0) {
+            lg = await loadStudentLoginNames(widget.sem);
+          }
+        } catch (e) {
+          debugPrint('auto sync failed: $e');
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        _students = st;
+        _logins = lg;
+        _loading = false;
+        _error = null;
+      });
+    } catch (e) {
+      debugPrint('student logins load failed: $e');
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error =
+            'Could not load student logins. Internet is required. Please try again.';
+      });
+    }
+  }
+
+  // Builds one of the two PDFs and opens the share sheet (or downloads it on web).
+  Future<void> _sharePdf(BuildContext ctx, Future<Uint8List> Function() build,
+      String fileName) async {
+    try {
+      final bytes = await build();
+      if (!ctx.mounted) return;
+      const caption = 'Student logins - keep private';
+      if (kIsWeb) {
+        await webShareOrDownload(ctx, bytes, fileName, text: caption);
+        return;
+      }
+      final dir = await getApplicationDocumentsDirectory();
+      final path = '${dir.path}/$fileName';
+      await File(path).writeAsBytes(bytes);
+      await SharePlus.instance.share(ShareParams(
+        files: [XFile(path)],
+        text: caption,
+      ));
+    } catch (e) {
+      debugPrint('student logins pdf failed: $e');
+      if (ctx.mounted) {
+        showSnack(ctx, 'Could not create the PDF. Please try again.',
+            color: kAbsent);
+      }
+    }
+  }
+
+  Future<void> _showCreds(List<StudentCred> creds, {String? title}) async {
+    final className =
+        _pdfSafe('${widget.deptName.isNotEmpty ? widget.deptName : widget.sem.deptId} | Section ${widget.sem.section} | ${widget.semLabel}');
+    final fileBase = exportFileBase(
+        widget.sem, widget.semLabel, 'Student_Logins',
+        deptName: widget.deptName);
+    final text = StringBuffer()
+      ..writeln('${widget.semLabel} • Section ${widget.sem.section}');
+    for (final c in creds) {
+      text.writeln(
+          'Roll ${rollOf(c.roll)} | ${c.name} | Username: ${c.username} | Password: ${c.password}');
+    }
+    final all = text.toString();
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title ??
+            '${creds.length} login${creds.length == 1 ? '' : 's'} created'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                    'Passwords are saved on this phone. You can export the PDF again any time from the three-dot menu (top right) of this screen. To change one password, use the key icon.',
+                    style: TextStyle(color: kAbsent, fontSize: 13)),
+                const SizedBox(height: 12),
+                SelectableText(all, style: const TextStyle(fontSize: 13)),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: all));
+              if (ctx.mounted) showSnack(ctx, 'Copied');
+            },
+            child: const Text('Copy all'),
+          ),
+          TextButton(
+            onPressed: () => _sharePdf(
+                ctx,
+                () => buildStudentCardsPdf(
+                    className: className, creds: creds),
+                '${fileBase}_Cards.pdf'),
+            child: const Text('Cards PDF'),
+          ),
+          TextButton(
+            onPressed: () => _sharePdf(
+                ctx,
+                () =>
+                    buildStudentListPdf(className: className, creds: creds),
+                '${fileBase}_List.pdf'),
+            child: const Text('List PDF'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _create({Set<String>? only, bool replaceAll = false}) async {
+    setState(() => _busy = true);
+    try {
+      final creds = await generateStudentLogins(widget.sem, onlyRolls: only);
+      if (!mounted) return;
+      await saveStudentPws(creds);
+      if (!mounted) return;
+      if (creds.isEmpty) {
+        showSnack(context, 'Every student already has a login.');
+      } else {
+        await _showCreds(creds,
+            title: replaceAll
+                ? '${creds.length} password${creds.length == 1 ? '' : 's'} reset'
+                : null);
+      }
+      await _load();
+    } catch (e) {
+      debugPrint('create student logins failed: $e');
+      if (mounted) {
+        showSnack(context,
+            'Could not create logins (${e is FirebaseException ? e.code : e.runtimeType}). Check your internet and try again.');
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  // Brings logins of the same students from another semester to this one.
+  Future<void> _adopt() async {
+    setState(() => _busy = true);
+    try {
+      final n = await adoptStudentLoginsEverywhere();
+      if (!mounted) return;
+      showSnack(
+          context,
+          n == 0
+              ? 'Everything is already synced.'
+              : '$n login${n == 1 ? '' : 's'} synced everywhere.');
+      await _load();
+    } catch (e) {
+      debugPrint('adopt student logins failed: $e');
+      if (mounted) {
+        showSnack(context, 'Could not sync logins. Check your internet and try again.',
+            color: kAbsent);
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _confirmResetAll() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Reset all passwords?'),
+        content: Text(
+            'New passwords will be made for all ${_students.length} students of this class. Every old password will stop working. Students without a login will get one.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Reset all')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    await _create(
+        only: {for (final st in _students) st['roll']!}, replaceAll: true);
+  }
+
+  // One menu behind the existing header icon: sync, reset all, export PDF.
+  Future<void> _openMenu() async {
+    if (_busy) return;
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.sync, color: kAccent),
+              title: const Text('Sync logins (all departments)'),
+              onTap: () => Navigator.pop(ctx, 'sync'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.lock_reset, color: kAccent),
+              title: const Text('Reset all passwords'),
+              onTap: () => Navigator.pop(ctx, 'reset'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.picture_as_pdf_outlined, color: kAccent),
+              title: const Text('Export passwords PDF'),
+              subtitle: const Text('Download again for this class and semester'),
+              onTap: () => Navigator.pop(ctx, 'pdf'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || choice == null) return;
+    if (choice == 'sync') {
+      await _adopt();
+    } else if (choice == 'reset') {
+      if (_students.isEmpty) {
+        showSnack(context, 'Add students first.');
+      } else {
+        await _confirmResetAll();
+      }
+    } else if (choice == 'pdf') {
+      final saved = await loadSavedStudentPws();
+      if (!mounted) return;
+      final creds = <StudentCred>[];
+      for (final st in _students) {
+        final roll = st['roll']!;
+        final username = _logins[roll];
+        final pw = username == null ? null : saved[username];
+        if (username != null && pw != null) {
+          creds.add(StudentCred(roll, st['name'] ?? '', username, pw));
+        }
+      }
+      if (creds.isEmpty) {
+        showSnack(context,
+            'No saved passwords for this class on this phone. Reset the passwords once and they will be saved here.');
+      } else {
+        await _showCreds(creds,
+            title: '${creds.length} saved password${creds.length == 1 ? '' : 's'}');
+      }
+    }
+  }
+
+  Future<void> _confirmReset(String roll, String name, bool hasLogin) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(hasLogin ? 'Set a new password?' : 'Create login?'),
+        content: Text(hasLogin
+            ? "$name's old password will stop working."
+            : 'A login will be created for $name.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Continue')),
+        ],
+      ),
+    );
+    if (ok == true) await _create(only: {roll});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final missing =
+        _students.where((st) => !_logins.containsKey(st['roll'])).length;
+    Widget body;
+    if (_loading) {
+      body = const Center(child: CircularProgressIndicator());
+    } else if (_error != null) {
+      body = Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(_error!,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: kAbsent)),
+              const SizedBox(height: 12),
+              TextButton(
+                onPressed: () {
+                  setState(() => _loading = true);
+                  _load();
+                },
+                child: const Text('Try again'),
+              ),
+            ],
+          ),
+        ),
+      );
+    } else if (_students.isEmpty) {
+      body = const EmptyState(
+          icon: Icons.groups_outlined, text: 'Add students first.');
+    } else {
+      body = ListView(
+        padding: const EdgeInsets.only(top: 6, bottom: 24),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 10),
+            child: GradientButton(
+              label: missing == 0
+                  ? 'All students have logins'
+                  : 'Create $missing missing login${missing == 1 ? '' : 's'}',
+              loading: _busy,
+              onPressed: (_busy || missing == 0) ? null : () => _create(),
+            ),
+          ),
+          for (final st in _students)
+            AppCard(
+              float: false,
+              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
+              child: Row(
+                children: [
+                  RollBadge(roll: st['roll']!),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: StudentNameBlock(
+                      name: st['name'] ?? '',
+                      extra: _logins[st['roll']] ?? 'No login yet',
+                      extraColor:
+                          _logins.containsKey(st['roll']) ? kAccent : kAbsent,
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.vpn_key_outlined, color: kAccent),
+                    tooltip: _logins.containsKey(st['roll'])
+                        ? 'Set a new password'
+                        : 'Create login',
+                    onPressed: _busy
+                        ? null
+                        : () => _confirmReset(st['roll']!, st['name'] ?? '',
+                            _logins.containsKey(st['roll'])),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      );
+    }
+    return Scaffold(
+      appBar: headerAppBar(
+        title: 'Student logins',
+        subtitle: '${widget.semLabel} • Section ${widget.sem.section}',
+        actions: [
+          HeaderTile(
+            icon: Icons.more_vert,
+            tooltip: 'Sync, reset all passwords, export PDF',
+            onTap: _openMenu,
+          ),
+        ],
+      ),
+      body: body,
+    );
+  }
+}
+
 // Teacher login / sign up
 // Stored at teachers/{username}: name, username, password, status.
 // New sign-ups start as 'pending' and need admin approval.
@@ -2161,7 +4304,12 @@ class _TeacherAuthScreenState extends State<TeacherAuthScreen> {
 
       if (_isLogin) {
         if (!exists) {
-          setState(() => _error = 'Account not found. Please sign up first.');
+          // A missing doc that came from the cache (or a failed read) does not
+          // prove the account is missing, so do not say so.
+          final unsure = snap == null || snap.metadata.isFromCache;
+          setState(() => _error = unsure
+              ? 'Could not load your account. Please check your internet and try again.'
+              : 'Account not found. Please sign up first.');
           return;
         }
         final data = snap.data() ?? {};
@@ -2191,13 +4339,28 @@ class _TeacherAuthScreenState extends State<TeacherAuthScreen> {
           setState(() => _error = 'This username is already taken');
           return;
         }
-        // Not awaited: set() does not complete while offline.
-        unawaited(ref.set({
+        final newDoc = {
           'name': name,
           'username': username,
           'password': password,
           'status': 'pending',
-        }).catchError((_) {}));
+        };
+        if (await _isOnline()) {
+          await AppSession.ensureSignedIn();
+          try {
+            await ref.set(newDoc).timeout(const Duration(seconds: 8));
+          } on TimeoutException {
+            // Slow network: Firestore keeps the write and sends it later.
+          } on FirebaseException catch (e) {
+            debugPrint('teacher sign up failed: ${e.code}');
+            setState(() => _error =
+                'Could not create the account (${e.code}). Please try again.');
+            return;
+          }
+        } else {
+          // Not awaited: set() does not complete while offline.
+          unawaited(ref.set(newDoc).catchError((_) {}));
+        }
         // No auto login: the admin has to approve the account first.
         if (mounted) {
           setState(() {
@@ -2799,6 +4962,9 @@ Future<DocumentSnapshot<Map<String, dynamic>>> safeGetDoc(
     DocumentReference<Map<String, dynamic>> ref) async {
   const cacheOnly = GetOptions(source: Source.cache);
   final net = await _netState();
+  if (net == _Net.reachable && FirebaseAuth.instance.currentUser == null) {
+    await AppSession.ensureSignedIn();
+  }
   if (net == _Net.reachable) {
     final server = ref.get();
     server.ignore();
@@ -2834,6 +5000,9 @@ Future<QuerySnapshot<Map<String, dynamic>>> safeGetQuery(
     Query<Map<String, dynamic>> query) async {
   const cacheOnly = GetOptions(source: Source.cache);
   final net = await _netState();
+  if (net == _Net.reachable && FirebaseAuth.instance.currentUser == null) {
+    await AppSession.ensureSignedIn();
+  }
   if (net == _Net.reachable) {
     final server = query.get();
     server.ignore();
@@ -3377,13 +5546,15 @@ String scopeLabel(String scope) => scope == kTypeLab
 String scopeFileTag(String scope) =>
     scope == kTypeLab ? 'Lab_' : (scope == kTypeClass ? 'Class_' : '');
 
-// File name start: Subject_Section_A_Semester_3
-String exportFileBase(SemRef sem, String semLabel, String subject) {
+// File name start: [Department_]Subject_Section_A_Semester_3
+String exportFileBase(SemRef sem, String semLabel, String subject,
+    {String deptName = ''}) {
   String clean(String v) => v
       .replaceAll(RegExp(r'[^A-Za-z0-9_\-]+'), '_')
       .replaceAll(RegExp(r'_+'), '_')
       .replaceAll(RegExp(r'^_|_$'), '');
   return [
+    clean(deptName),
     clean(subject),
     'Section_${clean(sem.section)}',
     clean(semLabel),
@@ -3930,14 +6101,18 @@ Future<Map<String, String>> loadSemesterLabels(
 
 // Copies all students of semester [from] to [to] (same department and section).
 // Nothing is overwritten: a clashing roll gets a new unique key. Returns the count.
-Future<int> copyStudentsToSemester(SemRef from, SemRef to) async {
+// When the admin copies, the students' logins (ID and key) move along to [to].
+Future<({int copied, int logins})> copyStudentsToSemester(
+    SemRef from, SemRef to) async {
   final src = await loadSemesterStudents(from);
-  if (src.isEmpty) return 0;
+  if (src.isEmpty) return (copied: 0, logins: 0);
   final dest = await loadSemesterStudents(to);
   final taken = dest.map((s) => s['roll']!).toSet();
+  final keyMap = <String, String>{};
   for (final s in src) {
     final key = uniqueStudentKey(rollOf(s['roll']!), taken);
     taken.add(key);
+    keyMap[s['roll']!] = key;
     final name = s['name']!;
     final father = s['father'] ?? '';
     unawaited(to.students
@@ -3946,7 +6121,17 @@ Future<int> copyStudentsToSemester(SemRef from, SemRef to) async {
             (Object e) => debugPrint('Copy student error: $e')));
     unawaited(LocalDb.upsertStudent(to, key, name, father));
   }
-  return src.length;
+  var moved = await moveStudentLogins(from, to, keyMap);
+  // Safety net: if some logins did not move (e.g. a weak connection), try to
+  // bring them over by roll + name, so the admin never needs a manual sync.
+  if (moved < keyMap.length) {
+    try {
+      moved += await adoptStudentLogins(to);
+    } catch (e) {
+      debugPrint('auto sync after copy failed: $e');
+    }
+  }
+  return (copied: src.length, logins: moved);
 }
 
 // Master list of a semester (admin-managed). Reads Firestore first and falls back
@@ -4127,6 +6312,169 @@ Future<List<DateRecord>> loadDateRecords(SemRef sem, String subject) async {
   }
   out.sort((a, b) => a.id.compareTo(b.id));
   return out;
+}
+
+// ---- Attendance summary: one small document per student ----
+// attendance_summary/{dept_section_sem_roll}
+//   subjects: { SUBJECT: { p, a, t, e: ['P|01 Oct · S2', 'A|02 Oct · S1 · Lab', ...] } }
+// Students read only this one document. Teachers/admin keep it updated whenever
+// attendance is saved, edited or deleted. A subject missing from the summary is
+// loaded the old way by the student app, so nothing breaks before a rebuild.
+String attLabel(DateRecord r) =>
+    '${prettySession(r.id)}${r.isLab ? ' · Lab' : ''}';
+
+DocumentReference<Map<String, dynamic>> summaryRef(SemRef sem, String roll) =>
+    FirebaseFirestore.instance.collection('attendance_summary').doc(
+        '${sem.deptId}_${sem.section}_${sem.semester}_$roll'
+            .replaceAll('/', '-'));
+
+Map<String, dynamic> _summaryOf(List<DateRecord> recs, String roll) {
+  var p = 0, a = 0;
+  final e = <String>[];
+  for (final r in recs) {
+    final st = r.status[roll];
+    if (st == 'P') {
+      p++;
+      e.add('P|${attLabel(r)}');
+    } else if (st == 'A') {
+      a++;
+      e.add('A|${attLabel(r)}');
+    }
+  }
+  return {'p': p, 'a': a, 't': recs.length, 'e': e};
+}
+
+// Counts failures during a summary rebuild, so the button can show an error.
+int summaryRebuildFails = 0;
+
+// Writes the subject's summary for every given student (rolls), 400 per batch.
+// Uses only data already in memory: no reads. Wrap in unawaited() when offline-safe.
+Future<void> pushAttendanceSummaries(SemRef sem, String subject,
+    List<DateRecord> recs, Iterable<String> rolls) async {
+  try {
+    final list = rolls.where((r) => r.isNotEmpty).toList();
+    final commits = <Future<void>>[];
+    for (var i = 0; i < list.length; i += 400) {
+      final b = FirebaseFirestore.instance.batch();
+      for (final roll in list.skip(i).take(400)) {
+        b.set(
+            summaryRef(sem, roll),
+            {
+              'subjects': {subject: _summaryOf(recs, roll)}
+            },
+            SetOptions(merge: true));
+      }
+      commits.add(b.commit().catchError((_) {
+        summaryRebuildFails++;
+      }));
+    }
+    await Future.wait(commits);
+  } catch (e) {
+    summaryRebuildFails++;
+    debugPrint('summary push failed: $e');
+  }
+}
+
+// A student removed from a subject: drop that subject from their summary.
+void dropSubjectFromSummary(SemRef sem, String subject, String roll) {
+  unawaited(summaryRef(sem, roll)
+      .set({
+        'subjects': {subject: FieldValue.delete()}
+      }, SetOptions(merge: true))
+      .catchError((_) {}));
+}
+
+// Removes one subject from the summaries of many students (batched, no reads).
+Future<void> dropSubjectFromSummaries(
+    SemRef sem, String subject, Iterable<String> rolls) async {
+  try {
+    final list = rolls.where((r) => r.isNotEmpty).toList();
+    for (var i = 0; i < list.length; i += 400) {
+      final b = FirebaseFirestore.instance.batch();
+      for (final roll in list.skip(i).take(400)) {
+        b.set(
+            summaryRef(sem, roll),
+            {
+              'subjects': {subject: FieldValue.delete()}
+            },
+            SetOptions(merge: true));
+      }
+      unawaited(b.commit().catchError((_) {}));
+    }
+  } catch (e) {
+    debugPrint('summary drop failed: $e');
+  }
+}
+
+// For admin screens that change records without having them all in memory.
+// `tweak` applies the just-made change to the freshly read list.
+Future<void> refreshSubjectSummary(SemRef sem, String subject,
+    {void Function(List<DateRecord> recs)? tweak}) async {
+  try {
+    final recs = await loadDateRecords(sem, subject);
+    tweak?.call(recs);
+    final st = await loadSubjectStudents(sem, subject);
+    await pushAttendanceSummaries(
+        sem, subject, recs, st.map((x) => x['roll'] ?? ''));
+  } catch (e) {
+    debugPrint('summary refresh failed: $e');
+  }
+}
+
+// One-time rebuild for old data (admin button on the Subjects screen).
+Future<int> rebuildSemesterSummaries(SemRef sem) async {
+  final subs = await _safeQuery(sem.subjects);
+  final master = await loadSemesterStudents(sem);
+  var n = 0;
+  for (final d in subs.docs) {
+    try {
+      final recs = await loadDateRecords(sem, d.id);
+      final ov = await loadOverrides(sem, d.id);
+      final rolls = <String>{for (final m in master) m['roll'] ?? ''};
+      ov.forEach((roll, o) {
+        if (o['kind'] == 'hidden') {
+          rolls.remove(roll);
+        } else if (o['kind'] == 'extra') {
+          rolls.add(roll);
+        }
+      });
+      await pushAttendanceSummaries(sem, d.id, recs, rolls)
+          .timeout(const Duration(seconds: 30));
+      n++;
+    } catch (e) {
+      summaryRebuildFails++;
+      debugPrint('rebuild ${d.id} failed: $e');
+    }
+  }
+  return n;
+}
+
+// Rebuild for EVERY department, section and semester in one tap (admin).
+// Returns the number of subjects rebuilt in total.
+Future<int> rebuildAllSummaries() async {
+  var total = 0;
+  try {
+    final depts = await _safeQuery(
+        FirebaseFirestore.instance.collection('departments'));
+    for (final d in depts.docs) {
+      if (d.id == kHiddenAdminDeptName) continue;
+      final data = d.data();
+      for (final sec in sectionsFrom(data)) {
+        for (final sid in semestersFrom(data, sec)) {
+          try {
+            total += await rebuildSemesterSummaries(SemRef(d.id, sec, sid));
+          } catch (e) {
+            summaryRebuildFails++;
+            debugPrint('rebuild ${d.id}/$sec/$sid failed: $e');
+          }
+        }
+      }
+    }
+  } catch (e) {
+    summaryRebuildFails++;
+    debugPrint('rebuild all failed: $e');
+  }
+  return total;
 }
 
 // Claim / unclaim a subject (teacher)
@@ -4311,12 +6659,22 @@ Future<void> _cleanupClaimOfSubject(
 }
 
 Future<void> deleteSubjectEverywhere(SemRef sem, String subject) async {
+  // Students of this subject, read BEFORE the data is deleted, so the subject
+  // can be removed from their attendance summaries (a re-created subject with
+  // the same name then starts clean).
+  List<String> summaryRolls = [];
+  try {
+    summaryRolls = (await loadSubjectStudents(sem, subject))
+        .map((x) => x['roll'] ?? '')
+        .toList();
+  } catch (_) {}
   final subSnap = await safeGetDocOrNull(sem.subjectDoc(subject));
   await _cleanupClaimOfSubject(sem, subject, subSnap?.data());
   _deleteDocs(await _getDocsForDelete(sem.dates(subject)));
   _deleteDocs(await _getDocsForDelete(sem.overrides(subject)));
   unawaited(sem.subjectDoc(subject).delete().catchError((_) {}));
   await LocalDb.deleteSubject(sem, subject);
+  unawaited(dropSubjectFromSummaries(sem, subject, summaryRolls));
 }
 
 
@@ -4496,6 +6854,14 @@ Future<void> renameSubjectEverywhere(
     throw RenameException('A subject with this name already exists.');
   }
 
+  // Students of the old subject, for the summary move at the end.
+  List<String> summaryRolls = [];
+  try {
+    summaryRolls = (await loadSubjectStudents(sem, oldName))
+        .map((x) => x['roll'] ?? '')
+        .toList();
+  } catch (_) {}
+
   final data = Map<String, dynamic>.from(oldSnap.data() ?? {});
   data['name'] = newName;
   final overrides = await _serverQuery(sem.overrides(oldName));
@@ -4533,6 +6899,10 @@ Future<void> renameSubjectEverywhere(
 
   await LocalDb.renameSubject(sem, oldName, newName);
   unawaited(syncLocalDbIfStale(force: true));
+
+  // Move the attendance summary: drop the old name, build the new one.
+  unawaited(dropSubjectFromSummaries(sem, oldName, summaryRolls));
+  unawaited(refreshSubjectSummary(sem, newName));
 }
 
 // Changes a student's roll number. Returns the new internal key.
@@ -4588,7 +6958,21 @@ Future<String> changeStudentRoll(
   await _commitInChunks(ops);
 
   await LocalDb.renameStudentKey(sem, oldKey, newKey, name, father);
+  // The student's login follows the new roll (never throws).
+  try {
+    final logins = await loadStudentLoginNames(sem);
+    final u = logins[oldKey];
+    if (u != null) {
+      await _studentLoginsRef
+          .doc(u)
+          .update({'roll': newKey}).timeout(const Duration(seconds: 15));
+    }
+  } catch (e) {
+    debugPrint('login roll update failed: $e');
+  }
   unawaited(syncLocalDbIfStale(force: true));
+  unawaited(summaryRef(sem, oldKey).delete().catchError((_) {}));
+  unawaited(rebuildSemesterSummaries(sem));
   return newKey;
 }
 
@@ -7269,6 +9653,7 @@ class SubjectsScreen extends StatelessWidget {
               unawaited(sem.subjectDoc(name).set(
                   {'name': name}, SetOptions(merge: true)).catchError((_) {}));
               unawaited(LocalDb.upsertSubject(sem, name));
+              unawaited(refreshSubjectSummary(sem, name));
               Navigator.pop(dialogContext);
             },
             child: const Text('Add'),
@@ -7308,9 +9693,39 @@ class SubjectsScreen extends StatelessWidget {
                 context,
                 MaterialPageRoute(
                   builder: (_) =>
-                      ManageStudentsScreen(sem: sem, semLabel: semLabel),
+                      ManageStudentsScreen(
+                          sem: sem, semLabel: semLabel, deptName: deptName),
                 ),
               ),
+            ),
+          if (isAdmin)
+            HeaderTile(
+              icon: Icons.sync_rounded,
+              tooltip: 'Rebuild summaries (everything)',
+              onTap: () async {
+                // Keep the messenger, so messages show even if screen closes.
+                final messenger = ScaffoldMessenger.of(context);
+                summaryRebuildFails = 0;
+                showStickySnack(messenger,
+                    'Rebuilding summaries for everything... this can take a while');
+                try {
+                  final n = await rebuildAllSummaries();
+                  if (summaryRebuildFails > 0) {
+                    showStickySnack(
+                        messenger,
+                        'Rebuild had errors ($summaryRebuildFails failed). '
+                        '$n subject(s) done. Please try again.',
+                        color: Colors.red.shade700);
+                  } else {
+                    showStickySnack(messenger,
+                        'Summaries rebuilt for $n subject(s) in all departments',
+                        color: Colors.green.shade700);
+                  }
+                } catch (e) {
+                  showStickySnack(messenger, 'Rebuild failed: $e',
+                      color: Colors.red.shade700);
+                }
+              },
             ),
         ],
       ),
@@ -8582,10 +10997,98 @@ Future<StudentImportDecision?> confirmStudentImportPlan(
 
 
 // Manage students screen (admin: master student list of this semester)
-class ManageStudentsScreen extends StatelessWidget {
+class ManageStudentsScreen extends StatefulWidget {
   final SemRef sem;
   final String semLabel;
-  const ManageStudentsScreen({super.key, required this.sem, required this.semLabel});
+  final String deptName;
+  const ManageStudentsScreen(
+      {super.key,
+      required this.sem,
+      required this.semLabel,
+      this.deptName = ''});
+
+  @override
+  State<ManageStudentsScreen> createState() => _ManageStudentsScreenState();
+}
+
+class _ManageStudentsScreenState extends State<ManageStudentsScreen> {
+  SemRef get sem => widget.sem;
+  String get semLabel => widget.semLabel;
+
+  // Bulk delete: tap the sweep icon, tick students (or Select all), then Delete.
+  bool _selecting = false;
+  final Set<String> _selected = {};
+  List<String> _allKeys = const [];
+
+  void _toggleSelect(String key) {
+    setState(() {
+      if (!_selected.remove(key)) _selected.add(key);
+    });
+  }
+
+  Future<void> _bulkDelete(BuildContext context) async {
+    final keys = _selected.toList();
+    if (keys.isEmpty) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete ${keys.length} student${keys.length == 1 ? '' : 's'}?'),
+        content: Text(
+            'They will be removed from $semLabel ${sem.section}.'
+            '${AppSession.isAdmin ? ' Their student logins (ID and key) will be deleted too.' : ''}'
+            ' This cannot be undone.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Delete', style: TextStyle(color: kAbsent))),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    var batch = FirebaseFirestore.instance.batch();
+    var ops = 0;
+    final commits = <Future<void>>[];
+    for (final k in keys) {
+      batch.delete(sem.students.doc(k));
+      unawaited(LocalDb.deleteStudent(sem, k));
+      if (++ops >= 400) {
+        commits.add(batch.commit());
+        batch = FirebaseFirestore.instance.batch();
+        ops = 0;
+      }
+    }
+    if (ops > 0) commits.add(batch.commit());
+    final res = await fsWriteAll(commits, what: 'bulk delete students');
+    if (res == SaveResult.saved) {
+      unawaited(LocalDb.refreshSemesterStudents(sem));
+    }
+    var logins = 0;
+    if (res == SaveResult.saved && AppSession.isAdmin) {
+      try {
+        logins = await deleteStudentLoginsFor(sem, keys.toSet());
+      } catch (e) {
+        debugPrint('bulk delete logins failed: $e');
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _selected.clear();
+      _selecting = false;
+    });
+    if (res == SaveResult.failed) {
+      showSnack(this.context, 'Could not delete on the server. Please try again.',
+          color: kAbsent);
+    } else {
+      showSnack(
+          this.context,
+          '${keys.length} student${keys.length == 1 ? '' : 's'} deleted'
+          '${logins > 0 ? ' • $logins login${logins == 1 ? '' : 's'} removed' : ''}');
+    }
+  }
 
   void _showStudentDialog(BuildContext context,
       {String? existingRoll, String? existingName, String? existingFather}) {
@@ -8740,14 +11243,16 @@ class ManageStudentsScreen extends StatelessWidget {
       ),
     );
     if (chosen == null) return;
-    final count = await copyStudentsToSemester(
+    final res = await copyStudentsToSemester(
         sem, SemRef(sem.deptId, sem.section, chosen));
     if (!context.mounted) return;
+    final count = res.copied;
     final destLabel = labels[chosen] ?? defaultSemesterLabel(chosen);
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(count == 0
           ? 'No students to copy.'
-          : '$count student${count == 1 ? '' : 's'} copied to $destLabel'),
+          : '$count student${count == 1 ? '' : 's'} copied to $destLabel'
+              '${res.logins > 0 ? ' • ${res.logins} login${res.logins == 1 ? '' : 's'} moved along' : ''}'),
     ));
   }
 
@@ -8834,6 +11339,11 @@ class ManageStudentsScreen extends StatelessWidget {
               final res = await fsWrite(write, what: 'delete student');
               if (res == SaveResult.saved) {
                 unawaited(LocalDb.refreshSemesterStudents(sem));
+                if (AppSession.isAdmin) {
+                  unawaited(deleteStudentLoginsFor(sem, {roll}).then((_) {},
+                      onError: (Object e) =>
+                          debugPrint('delete student login failed: $e')));
+                }
               }
             },
             child: const Text('Delete', style: TextStyle(color: kAbsent)),
@@ -8860,12 +11370,76 @@ class ManageStudentsScreen extends StatelessWidget {
             tooltip: 'Copy students to another semester',
             onTap: () => _showCopyDialog(context),
           ),
+          HeaderTile(
+            icon: _selecting ? Icons.close : Icons.delete_sweep_outlined,
+            tooltip: _selecting ? 'Cancel' : 'Delete many students',
+            onTap: () => setState(() {
+              _selecting = !_selecting;
+              _selected.clear();
+            }),
+          ),
+          if (AppSession.isAdmin)
+            HeaderTile(
+              icon: Icons.vpn_key_outlined,
+              tooltip: 'Student logins',
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) =>
+                        StudentLoginsScreen(
+                            sem: sem,
+                            semLabel: semLabel,
+                            deptName: widget.deptName)),
+              ),
+            ),
         ],
       ),
-      floatingActionButton: GradFab(
-        icon: Icons.person_add_alt_1,
-        onPressed: () => _showStudentDialog(context),
-      ),
+      floatingActionButton: _selecting
+          ? null
+          : GradFab(
+              icon: Icons.person_add_alt_1,
+              onPressed: () => _showStudentDialog(context),
+            ),
+      bottomNavigationBar: _selecting
+          ? SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => setState(() {
+                          if (_selected.length == _allKeys.length) {
+                            _selected.clear();
+                          } else {
+                            _selected
+                              ..clear()
+                              ..addAll(_allKeys);
+                          }
+                        }),
+                        child: Text(_selected.length == _allKeys.length &&
+                                _allKeys.isNotEmpty
+                            ? 'Clear all'
+                            : 'Select all'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                            backgroundColor: kAbsent,
+                            foregroundColor: Colors.white),
+                        onPressed: _selected.isEmpty
+                            ? null
+                            : () => _bulkDelete(context),
+                        child: Text('Delete (${_selected.length})'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          : null,
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: liveQuery(sem.students),
         builder: (context, snapshot) {
@@ -8883,6 +11457,8 @@ class ManageStudentsScreen extends StatelessWidget {
           docs.sort((a, b) => compareStudentKeys(
               (a.data()['roll'] ?? a.id).toString(),
               (b.data()['roll'] ?? b.id).toString()));
+          _allKeys =
+              docs.map((d) => (d.data()['roll'] ?? d.id).toString()).toList();
 
           return ListView.builder(
             padding: const EdgeInsets.only(top: 6, bottom: 90),
@@ -8902,19 +11478,32 @@ class ManageStudentsScreen extends StatelessWidget {
                     RollBadge(roll: roll),
                     const SizedBox(width: 12),
                     Expanded(
-                      child: StudentNameBlock(name: name, father: father),
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: _selecting ? () => _toggleSelect(roll) : null,
+                        child: StudentNameBlock(name: name, father: father),
+                      ),
                     ),
-                    IconButton(
-                      icon: const Icon(Icons.edit_outlined, color: kAccent),
-                      onPressed: () => _showStudentDialog(context,
-                          existingRoll: roll,
-                          existingName: name,
-                          existingFather: father),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.delete_outline, color: kAbsent),
-                      onPressed: () => _confirmDeleteStudent(context, roll, name),
-                    ),
+                    if (_selecting)
+                      Checkbox(
+                        value: _selected.contains(roll),
+                        activeColor: kAccent,
+                        onChanged: (_) => _toggleSelect(roll),
+                      )
+                    else ...[
+                      IconButton(
+                        icon: const Icon(Icons.edit_outlined, color: kAccent),
+                        onPressed: () => _showStudentDialog(context,
+                            existingRoll: roll,
+                            existingName: name,
+                            existingFather: father),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.delete_outline, color: kAbsent),
+                        onPressed: () =>
+                            _confirmDeleteStudent(context, roll, name),
+                      ),
+                    ],
                   ],
                 ),
               );
@@ -9111,6 +11700,9 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
                   {'name': name, 'father': father, 'kind': 'extra'});
               Navigator.pop(dialogContext);
               final res = await fsWrite(write, what: 'subject student');
+              if (res == SaveResult.saved) {
+                unawaited(refreshSubjectSummary(sem, sub));
+              }
               if (!mounted) return;
               await finishStudentWrite(context, sem, res, subject: sub);
             },
@@ -9252,6 +11844,7 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
             onPressed: () {
               final sem = widget.sem;
               final sub = widget.subjectName;
+              dropSubjectFromSummary(sem, sub, roll);
               if (_master.containsKey(roll)) {
                 // Student from the master list: add a "hidden" marker
                 unawaited(fsWrite(
@@ -11078,6 +13671,18 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
     final rec = DateRecord(docId, Map<String, String>.from(status),
         Map<String, String>.from(newMeta));
 
+    // Edit of a saved session: only students whose mark changed need a new summary.
+    // A new session (or a Class/Lab change) changes everyone, so write all.
+    final oldIdx = _records.indexWhere((r) => r.id == docId);
+    List<String> summaryRolls = [for (final s in students) s['roll'] ?? ''];
+    if (oldIdx >= 0 && _records[oldIdx].isLab == (sessionType == kTypeLab)) {
+      final old = _records[oldIdx];
+      summaryRolls = [
+        for (final s in students)
+          if (old.status[s['roll']] != status[s['roll']]) s['roll'] ?? ''
+      ];
+    }
+
     setState(() {
       final idx = _records.indexWhere((r) => r.id == docId);
       if (idx >= 0) {
@@ -11091,6 +13696,10 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       existingMeta = newMeta;
       _computePercentages();
     });
+    if (summaryRolls.isNotEmpty) {
+      unawaited(pushAttendanceSummaries(
+          widget.sem, widget.subjectName, _records, summaryRolls));
+    }
 
     if (mounted) {
       showSnack(context,
@@ -11112,6 +13721,8 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       timeStr = hhmm(TimeOfDay.now());
       _computePercentages();
     });
+    unawaited(pushAttendanceSummaries(widget.sem, widget.subjectName, _records,
+        students.map((s) => s['roll'] ?? '')));
 
     if (mounted) {
       showSnack(context, 'Attendance record for Session $selectedSession deleted!',
@@ -11218,6 +13829,10 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
     _records.sort((a, b) => a.id.compareTo(b.id));
     _fetchAttendanceForDate();
     _computePercentages();
+    if (imported > 0) {
+      unawaited(pushAttendanceSummaries(widget.sem, widget.subjectName,
+          _records, students.map((s) => s['roll'] ?? '')));
+    }
     if (!mounted) return;
     setState(() {});
     showSnack(
@@ -11876,7 +14491,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
 // Manage attendance screen (edit / delete old records)
 // Admin, or a teacher with Edit, Delete and/or Class/Lab permission (or master
 // switch ON). Each button follows its own permission.
-class ManageAttendanceScreen extends StatelessWidget {
+class ManageAttendanceScreen extends StatefulWidget {
   final SemRef sem;
   final String semLabel;
   final String subjectName;
@@ -11886,6 +14501,43 @@ class ManageAttendanceScreen extends StatelessWidget {
     required this.semLabel,
     required this.subjectName,
   });
+
+  @override
+  State<ManageAttendanceScreen> createState() => _ManageAttendanceScreenState();
+}
+
+// One saved session shown on the Records screen.
+class _RecItem {
+  final String docId;
+  final String label; // "22 Oct 2026 - Session 1" (dialogs / messages)
+  final DateTime? date;
+  final int? session;
+  final int present;
+  final int absent;
+  final String time;
+  final String by;
+  final bool isLab;
+  final bool isFinal;
+  const _RecItem({
+    required this.docId,
+    required this.label,
+    required this.date,
+    required this.session,
+    required this.present,
+    required this.absent,
+    required this.time,
+    required this.by,
+    required this.isLab,
+    required this.isFinal,
+  });
+}
+
+class _ManageAttendanceScreenState extends State<ManageAttendanceScreen> {
+  SemRef get sem => widget.sem;
+  String get semLabel => widget.semLabel;
+  String get subjectName => widget.subjectName;
+
+  String _filter = 'all'; // all | class | lab | mid
 
   void _confirmDelete(BuildContext context, String docId, String label) {
     showDialog(
@@ -11903,6 +14555,8 @@ class ManageAttendanceScreen extends StatelessWidget {
               Navigator.pop(dialogContext);
               unawaited(sem.dates(subjectName).doc(docId).delete().catchError((_) {}));
               unawaited(LocalDb.deleteAttendance(sem, subjectName, docId));
+              unawaited(refreshSubjectSummary(sem, subjectName,
+                  tweak: (l) => l.removeWhere((r) => r.id == docId)));
               if (context.mounted) showSnack(context, 'Deleted record for $label');
             },
             child: const Text('Delete', style: TextStyle(color: kAbsent)),
@@ -11934,6 +14588,13 @@ class ManageAttendanceScreen extends StatelessWidget {
                   .doc(docId)
                   .update({'_type': newType}).catchError((_) {}));
               unawaited(LocalDb.setSessionType(sem, subjectName, docId, newType));
+              unawaited(refreshSubjectSummary(sem, subjectName, tweak: (l) {
+                final i = l.indexWhere((r) => r.id == docId);
+                if (i >= 0) {
+                  l[i] = DateRecord(l[i].id, l[i].status,
+                      {...l[i].meta, '_type': newType});
+                }
+              }));
               if (context.mounted) {
                 showSnack(context, '$label is now ${typeLabel(newType)}');
               }
@@ -11991,6 +14652,12 @@ class ManageAttendanceScreen extends StatelessWidget {
           .set({roll: status}, SetOptions(merge: true)).catchError((_) {}));
     }
     unawaited(LocalDb.setStudentStatusAll(sem, subjectName, roll, status));
+    unawaited(refreshSubjectSummary(sem, subjectName, tweak: (l) {
+      for (var i = 0; i < l.length; i++) {
+        l[i] = DateRecord(
+            l[i].id, {...l[i].status, roll: status}, Map.of(l[i].meta));
+      }
+    }));
     return records.length;
   }
 
@@ -12166,240 +14833,415 @@ class ManageAttendanceScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildRecords(BuildContext context, bool canEdit, bool canDelete,
-      bool canChangeType, bool canChangePhase) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('$subjectName - Records'),
-        actions: [
-          if (canEdit)
-            IconButton(
-              icon: const Icon(Icons.how_to_reg_outlined),
-              tooltip: 'Mark a student in all records',
-              onPressed: () => _openStudentBulkSheet(context),
-            ),
-        ],
+  // One saved session, parsed from its Firestore document.
+  _RecItem _parseRecord(QueryDocumentSnapshot<Map<String, dynamic>> doc) {
+    final docId = doc.id;
+    DateTime? date;
+    int? session;
+    String label = docId;
+    try {
+      final parts = docId.split('_Session_');
+      date = DateFormat('yyyy-MM-dd').parse(parts[0]);
+      session = int.parse(parts[1]);
+      label = '${DateFormat('dd MMM yyyy').format(date)} - Session $session';
+    } catch (_) {
+      date = null;
+      session = null;
+      label = docId;
+    }
+    final parsed = parseAttendance(doc.data());
+    return _RecItem(
+      docId: docId,
+      label: label,
+      date: date,
+      session: session,
+      present: parsed.status.values.where((v) => v == 'P').length,
+      absent: parsed.status.values.where((v) => v == 'A').length,
+      time: fmtHhmm(parsed.meta['_time']),
+      by: parsed.meta['_marked_by_name'] ?? '',
+      isLab: parsed.meta['_type'] == kTypeLab,
+      isFinal: parsed.meta['_phase'] == kPhaseFinal,
+    );
+  }
+
+  Widget _recStatTile(String value, String label, Color color) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFF16215F),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: kGlassBorder),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(value,
+                style: TextStyle(
+                    color: color,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w700,
+                    height: 1.1)),
+            const SizedBox(height: 2),
+            Text(label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: kMuted, fontSize: 12)),
+          ],
+        ),
       ),
-      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-        stream: liveQuery(sem.dates(subjectName)),
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting &&
-              !snapshot.hasData) {
-            return const Center(child: CircularProgressIndicator());
-          }
+    );
+  }
 
-          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-            return EmptyState(
-              icon: Icons.event_busy,
-              text: 'No attendance records found.',
-              actionLabel: 'Mark attendance',
-              // This screen is opened from the marking screen, so go back to it.
-              onAction: () => Navigator.pop(context),
-            );
-          }
+  Widget _recTag(String text, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(text,
+          style: TextStyle(
+              color: color, fontSize: 12, fontWeight: FontWeight.w600)),
+    );
+  }
 
-          final docs = snapshot.data!.docs.toList();
-          docs.sort((a, b) => b.id.compareTo(a.id));
+  Widget _recCountChip(String text, Color color) {
+    return Text(text,
+        style: TextStyle(
+            color: color, fontSize: 13.5, fontWeight: FontWeight.w700));
+  }
 
-          return ListView.builder(
-            padding: const EdgeInsets.only(top: 6, bottom: 24),
-            itemCount: docs.length,
-            itemBuilder: (context, index) {
-              final doc = docs[index];
-              final docId = doc.id;
+  // Small pill under a record (Lab / Final / Edit / Delete).
+  Widget _recAction({
+    required IconData icon,
+    required String text,
+    required VoidCallback? onTap,
+    bool filled = false,
+    bool red = false,
+  }) {
+    return Expanded(
+      child: GradPill(
+        label: text,
+        icon: icon,
+        onTap: onTap,
+        enabled: onTap != null,
+        filled: filled,
+        gradient: red ? kRedGrad : kBlueGrad,
+        height: 34,
+        fontSize: 13,
+      ),
+    );
+  }
 
-              DateTime? parsedDate;
-              int? parsedSession;
-              String label = docId;
-              String dateText = docId; // shown on the card (date only)
-              try {
-                List<String> parts = docId.split('_Session_');
-                parsedDate = DateFormat('yyyy-MM-dd').parse(parts[0]);
-                parsedSession = int.parse(parts[1]);
-                dateText = DateFormat('dd MMM yyyy').format(parsedDate);
-                // Full label is still used in dialogs and messages.
-                label = "$dateText - Session $parsedSession";
-              } catch (e) {
-                label = docId;
-                dateText = docId;
-              }
+  Widget _recordCard(BuildContext context, _RecItem it, bool canEdit,
+      bool canDelete, bool canChangeType, bool canChangePhase) {
+    final total = it.present + it.absent;
+    final pct = total > 0 ? it.present / total * 100 : 0.0;
+    final meta = <String>[
+      if (it.time.isNotEmpty) it.time,
+      if (it.by.isNotEmpty) it.by,
+    ].join(' · ');
 
-              final parsed = parseAttendance(doc.data());
-              int presentCount = parsed.status.values.where((v) => v == 'P').length;
-              int absentCount = parsed.status.values.where((v) => v == 'A').length;
-              final time = fmtHhmm(parsed.meta['_time']);
-              final by = parsed.meta['_marked_by_name'] ?? '';
-              final isLab = parsed.meta['_type'] == kTypeLab;
-              final isFinal = parsed.meta['_phase'] == kPhaseFinal;
+    final actions = <Widget>[
+      if (canChangeType)
+        _recAction(
+          // Shows what it will become.
+          icon: it.isLab ? Icons.class_outlined : Icons.science_outlined,
+          text: it.isLab ? 'Class' : 'Lab',
+          onTap: () => _confirmChangeType(
+              context, it.docId, it.label, it.isLab ? kTypeClass : kTypeLab),
+        ),
+      if (canChangePhase)
+        _recAction(
+          icon: it.isFinal
+              ? Icons.hourglass_top_rounded
+              : Icons.emoji_events_outlined,
+          text: it.isFinal ? 'Mid' : 'Final',
+          filled: true,
+          onTap: () => _confirmChangePhase(context, it.docId, it.label,
+              it.isFinal ? kPhaseMid : kPhaseFinal),
+        ),
+      if (canEdit)
+        _recAction(
+          icon: Icons.edit_outlined,
+          text: 'Edit',
+          onTap: (it.date == null || it.session == null)
+              ? null
+              : () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => SubjectAttendanceScreen(
+                        sem: sem,
+                        semLabel: semLabel,
+                        subjectName: subjectName,
+                        initialDate: it.date,
+                        initialSession: it.session,
+                      ),
+                    ),
+                  );
+                },
+        ),
+      if (canDelete)
+        _recAction(
+          icon: Icons.delete_outline,
+          text: 'Delete',
+          red: true,
+          onTap: () => _confirmDelete(context, it.docId, it.label),
+        ),
+    ];
 
-              return AppCard(
-                margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
-                padding: const EdgeInsets.fromLTRB(14, 10, 8, 6),
+    return AppCard(
+      subtle: true,
+      radius: 20,
+      padding: const EdgeInsets.all(12),
+      margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+      child: Column(
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  gradient: kBlueGrad,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Text(
+                  it.session == null ? '-' : 'S${it.session}',
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
                 child: Column(
-                  children: [
-                  Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    const IconBadge(icon: Icons.event_note, size: 40),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: [
+                        _recTag(it.isLab ? 'Lab' : 'Class',
+                            it.isLab ? kLabelBlue : kAccent),
+                        _recTag(it.isFinal ? 'Final' : 'Mid',
+                            it.isFinal ? kAbsent : kViolet),
+                      ],
+                    ),
+                    if (meta.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Row(
                         children: [
-                          Wrap(
-                            spacing: 6,
-                            runSpacing: 4,
-                            crossAxisAlignment: WrapCrossAlignment.center,
-                            children: [
-                              Text(dateText,
-                                  softWrap: false,
-                                  style: const TextStyle(
-                                      fontWeight: FontWeight.w700)),
-                              // Session number badge, next to the date.
-                              if (parsedSession != null) ...[
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 7, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: Colors.white.withValues(alpha: 0.12),
-                                    borderRadius: BorderRadius.circular(6),
-                                  ),
-                                  child: Text(
-                                    'S$parsedSession',
-                                    style: const TextStyle(
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w700),
-                                  ),
-                                ),
-                              ],
-                              // Session type chip: quick visual cue for Class vs Lab.
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 7, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: (isLab ? kAccent : kPresent)
-                                      .withValues(alpha: 0.18),
-                                  borderRadius: BorderRadius.circular(6),
-                                  border: Border.all(
-                                      color: (isLab ? kAccent : kPresent)
-                                          .withValues(alpha: 0.5)),
-                                ),
-                                child: Text(
-                                  typeLabel(isLab ? kTypeLab : kTypeClass),
-                                  style: TextStyle(
-                                      color: isLab ? kAccent : kPresent,
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w700),
-                                ),
-                              ),
-                              // Exam phase chip: Mid or Final.
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 7, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: (isFinal ? kAccent2 : kMuted)
-                                      .withValues(alpha: 0.18),
-                                  borderRadius: BorderRadius.circular(6),
-                                  border: Border.all(
-                                      color: (isFinal ? kAccent2 : kMuted)
-                                          .withValues(alpha: 0.5)),
-                                ),
-                                child: Text(
-                                  phaseLabel(isFinal ? kPhaseFinal : kPhaseMid),
-                                  style: TextStyle(
-                                      color: isFinal ? kAccent2 : kMuted,
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w700),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Present: $presentCount | Absent: $absentCount'
-                            '${time.isEmpty ? '' : ' | $time'}'
-                            '${by.isEmpty ? '' : ' | $by'}',
-                            style: const TextStyle(color: kMuted, fontSize: 12.5),
+                          const Icon(Icons.schedule, color: kMuted, size: 14),
+                          const SizedBox(width: 5),
+                          Expanded(
+                            child: Text(meta,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    color: kMuted, fontSize: 13)),
                           ),
                         ],
                       ),
-                    ),
-                  ],
-                  ),
-                  const SizedBox(height: 4),
-                  // Action buttons on their own row so the text gets full width.
-                  Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    if (canChangeType)
-                    IconButton(
-                      // Shows what it will become: flask = Lab, class = Class.
-                      icon: Icon(
-                          isLab ? Icons.class_outlined : Icons.science_outlined,
-                          color: kAccent),
-                      tooltip:
-                          isLab ? 'Change to Class' : 'Change to Lab Class',
-                      onPressed: () => _confirmChangeType(context, docId, label,
-                          isLab ? kTypeClass : kTypeLab),
-                    ),
-                    if (canChangePhase)
-                    IconButton(
-                      // Shows what it will become: trophy = Final, hourglass = Mid.
-                      // Violet so it never looks like the Class / Lab button.
-                      icon: Icon(
-                          isFinal
-                              ? Icons.hourglass_top_rounded
-                              : Icons.emoji_events_outlined,
-                          color: kViolet),
-                      tooltip: isFinal ? 'Change to Mid' : 'Change to Final',
-                      onPressed: () => _confirmChangePhase(context, docId, label,
-                          isFinal ? kPhaseMid : kPhaseFinal),
-                    ),
-                    if (canEdit)
-                    IconButton(
-                      icon: const Icon(Icons.edit_outlined, color: kAccent),
-                      tooltip: 'Edit',
-                      onPressed: (parsedDate == null || parsedSession == null)
-                          ? null
-                          : () {
-                              Navigator.push(
-                                context,
-                                MaterialPageRoute(
-                                  builder: (_) => SubjectAttendanceScreen(
-                                    sem: sem,
-                                    semLabel: semLabel,
-                                    subjectName: subjectName,
-                                    initialDate: parsedDate,
-                                    initialSession: parsedSession,
-                                  ),
-                                ),
-                              );
-                            },
-                    ),
-                    if (canDelete)
-                    // Red tint container makes the destructive action stand
-                    // out from Edit / Change-type, which share a neutral accent.
-                    Container(
-                      margin: const EdgeInsets.only(left: 2),
-                      decoration: BoxDecoration(
-                        color: kAbsent.withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: kAbsent.withValues(alpha: 0.35)),
-                      ),
-                      child: IconButton(
-                        icon: const Icon(Icons.delete_outline, color: kAbsent),
-                        tooltip: 'Delete',
-                        onPressed: () => _confirmDelete(context, docId, label),
-                      ),
-                    ),
-                  ],
-                  ),
+                    ],
                   ],
                 ),
-              );
-            },
-          );
-        },
+              ),
+              const SizedBox(width: 8),
+              _PanelRing(
+                  pct: pct,
+                  color: kAccent,
+                  size: 46,
+                  stroke: 4,
+                  fontSize: 12),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Wrap(
+              spacing: 16,
+              runSpacing: 4,
+              children: [
+                _recCountChip('Present ${it.present}', kAccent),
+                _recCountChip('Absent ${it.absent}', kAbsent),
+              ],
+            ),
+          ),
+          if (actions.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                for (var i = 0; i < actions.length; i++) ...[
+                  if (i > 0) const SizedBox(width: 6),
+                  actions[i],
+                ],
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRecords(BuildContext context, bool canEdit, bool canDelete,
+      bool canChangeType, bool canChangePhase) {
+    return Scaffold(
+      body: Padding(
+        padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top),
+        child: Column(
+          children: [
+            HeaderCard(
+              title: subjectName,
+              subtitle: 'Records',
+              actions: [
+                if (canEdit)
+                  HeaderTile(
+                    icon: Icons.how_to_reg_outlined,
+                    tooltip: 'Mark a student in all records',
+                    onTap: () => _openStudentBulkSheet(context),
+                  ),
+              ],
+            ),
+            Expanded(
+              child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                stream: liveQuery(sem.dates(subjectName)),
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.waiting &&
+                      !snapshot.hasData) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+
+                  if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                    return EmptyState(
+                      icon: Icons.event_busy,
+                      text: 'No attendance records found.',
+                      actionLabel: 'Mark attendance',
+                      // This screen is opened from the marking screen, so go back to it.
+                      onAction: () => Navigator.pop(context),
+                    );
+                  }
+
+                  final docs = snapshot.data!.docs.toList();
+                  docs.sort((a, b) => b.id.compareTo(a.id));
+                  final items = [for (final d in docs) _parseRecord(d)];
+
+                  // Top numbers: all sessions of this subject.
+                  double pctSum = 0;
+                  int counted = 0;
+                  for (final it in items) {
+                    final t = it.present + it.absent;
+                    if (t > 0) {
+                      pctSum += it.present / t * 100;
+                      counted++;
+                    }
+                  }
+                  final avg = counted == 0 ? 0.0 : pctSum / counted;
+                  final midCount = items.where((i) => !i.isFinal).length;
+
+                  final shown = items.where((i) {
+                    switch (_filter) {
+                      case 'class':
+                        return !i.isLab;
+                      case 'lab':
+                        return i.isLab;
+                      case 'mid':
+                        return !i.isFinal;
+                      default:
+                        return true;
+                    }
+                  }).toList();
+
+                  // Group by date (already newest first).
+                  final children = <Widget>[];
+                  String? lastKey;
+                  for (final it in shown) {
+                    final key = it.date == null
+                        ? it.docId
+                        : DateFormat('dd MMM yyyy')
+                            .format(it.date!)
+                            .toUpperCase();
+                    if (key != lastKey) {
+                      lastKey = key;
+                      children.add(Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 8, 0, 4),
+                        child: Text(key,
+                            style: TextStyle(
+                                color: kViolet.withValues(alpha: 0.95),
+                                fontSize: 12.5,
+                                letterSpacing: 1.8,
+                                fontWeight: FontWeight.w600)),
+                      ));
+                    }
+                    children.add(_recordCard(context, it, canEdit, canDelete,
+                        canChangeType, canChangePhase));
+                  }
+
+                  Widget filterPill(String label, String key) => Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: GradPill(
+                          label: label,
+                          filled: _filter == key,
+                          height: 34,
+                          fontSize: 13.5,
+                          onTap: () => setState(() => _filter = key),
+                        ),
+                      );
+
+                  return ListView(
+                    padding: const EdgeInsets.fromLTRB(0, 4, 0, 14),
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 14),
+                        child: Row(
+                          children: [
+                            _recStatTile(
+                                '${items.length}', 'Sessions', Colors.white),
+                            const SizedBox(width: 8),
+                            _recStatTile(
+                                '${avg.round()}%', 'Avg present', kAccent),
+                            const SizedBox(width: 8),
+                            _recStatTile('$midCount', 'Mid sessions', kViolet),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        padding: const EdgeInsets.symmetric(horizontal: 14),
+                        child: Row(
+                          children: [
+                            filterPill('All', 'all'),
+                            filterPill('Class', 'class'),
+                            filterPill('Lab', 'lab'),
+                            filterPill('Mid', 'mid'),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      if (children.isEmpty)
+                        const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 32),
+                          child: Center(
+                            child: Text('No records match this filter.',
+                                style: TextStyle(color: kMuted, fontSize: 15)),
+                          ),
+                        )
+                      else
+                        ...children,
+                    ],
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -12631,6 +15473,313 @@ StudentStatCard buildStudentStatCard(
   );
 }
 
+// ===========================================================================
+// Panel design (used by Subject Stats and Records): one big dark rounded
+// panel, lighter rounded cards inside it, cyan / pink / violet accents.
+// ===========================================================================
+const Color _kPanelField = Color(0xFF1B2262);
+
+// Circular progress ring with rounded ends (starts at the top).
+class _PanelRingPainter extends CustomPainter {
+  final double value; // 0..1
+  final Color color;
+  final Color track;
+  final double stroke;
+  const _PanelRingPainter({
+    required this.value,
+    required this.color,
+    required this.track,
+    required this.stroke,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final c = Offset(size.width / 2, size.height / 2);
+    final r = (size.width - stroke) / 2;
+    final rect = Rect.fromCircle(center: c, radius: r);
+    canvas.drawCircle(
+        c,
+        r,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = stroke
+          ..color = track);
+    final v = value.clamp(0.0, 1.0).toDouble();
+    if (v <= 0) return;
+    canvas.drawArc(
+        rect,
+        -_kPi / 2,
+        2 * _kPi * v,
+        false,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = stroke
+          ..strokeCap = StrokeCap.round
+          ..color = color);
+  }
+
+  @override
+  bool shouldRepaint(_PanelRingPainter o) =>
+      o.value != value ||
+      o.color != color ||
+      o.track != track ||
+      o.stroke != stroke;
+}
+
+// Ring with a percentage in the middle.
+class _PanelRing extends StatelessWidget {
+  final double pct; // 0..100
+  final Color color;
+  final double size;
+  final double stroke;
+  final double fontSize;
+  const _PanelRing({
+    required this.pct,
+    required this.color,
+    required this.size,
+    required this.stroke,
+    required this.fontSize,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: size,
+      height: size,
+      child: CustomPaint(
+        painter: _PanelRingPainter(
+          value: pct / 100,
+          color: color,
+          track: color.withValues(alpha: 0.22),
+          stroke: stroke,
+        ),
+        child: Center(
+          child: Text('${pct.round()}%',
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: fontSize,
+                  fontWeight: FontWeight.w700)),
+        ),
+      ),
+    );
+  }
+}
+
+// One student's numbers for the Subject Stats screen.
+class _StatRow {
+  final String roll;
+  final String name;
+  final String father;
+  final int present;
+  final int absent;
+  final int total;
+  final List<StatEntry> entries;
+  const _StatRow({
+    required this.roll,
+    required this.name,
+    required this.father,
+    required this.present,
+    required this.absent,
+    required this.total,
+    required this.entries,
+  });
+
+  double get pct => total > 0 ? (present / total) * 100 : 0.0;
+  bool get safe => pct >= 75;
+  bool get perfect => total > 0 && present == total;
+}
+
+_StatRow _buildStatRow(Map<String, String> student, List<DateRecord> records) {
+  final roll = student['roll'] ?? '';
+  int present = 0;
+  int absent = 0;
+  final entries = <StatEntry>[];
+  for (final r in records) {
+    final st = r.status[roll];
+    if (st == 'P') {
+      present++;
+      entries.add(StatEntry(prettySession(r.id), true));
+    } else if (st == 'A') {
+      absent++;
+      entries.add(StatEntry(prettySession(r.id), false));
+    }
+  }
+  return _StatRow(
+    roll: roll,
+    name: student['name'] ?? '',
+    father: student['father'] ?? '',
+    present: present,
+    absent: absent,
+    total: records.length,
+    entries: entries,
+  );
+}
+
+// Student card of the Subject Stats screen.
+class _SubjectStatTile extends StatefulWidget {
+  final _StatRow row;
+  const _SubjectStatTile({super.key, required this.row});
+
+  @override
+  State<_SubjectStatTile> createState() => _SubjectStatTileState();
+}
+
+class _SubjectStatTileState extends State<_SubjectStatTile> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final r = widget.row;
+    final good = r.safe;
+    final color = good ? kAccent : kAbsent;
+
+    // Classes the student can still miss (safe) or must attend (low) to stay
+    // at / get back to 75%.
+    String note;
+    if (r.total == 0) {
+      note = 'No classes yet';
+    } else if (good) {
+      final x = (4 * r.present - 3 * r.total) ~/ 3;
+      note = x <= 0
+          ? 'Cannot miss any more classes'
+          : 'Can miss $x more ${x == 1 ? 'class' : 'classes'}';
+    } else {
+      final y = 3 * r.total - 4 * r.present;
+      note = 'Attend next $y ${y == 1 ? 'class' : 'classes'} to reach 75%';
+    }
+
+    final father = r.father.trim();
+    final sub = 'Roll ${rollOf(r.roll)}${father.isEmpty ? '' : ' · F/N $father'}';
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+      decoration: BoxDecoration(
+        color: good ? const Color(0xFF16215F) : kAbsent.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+            color: good ? kGlassBorder : kAbsent.withValues(alpha: 0.5)),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(20),
+          onTap: r.entries.isEmpty ? null : () => setState(() => _open = !_open),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 14, 8),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    _PanelRing(
+                        pct: r.pct,
+                        color: color,
+                        size: 42,
+                        stroke: 4,
+                        fontSize: 10.5),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(r.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 15.5,
+                                  fontWeight: FontWeight.w700)),
+                          const SizedBox(height: 1),
+                          Text(sub,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  color: kMuted, fontSize: 12.5)),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text('${r.present} P',
+                            style: const TextStyle(
+                                color: kAccent,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700)),
+                        Text('${r.absent} A',
+                            style: const TextStyle(
+                                color: kAbsent,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700)),
+                      ],
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(note,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              color: color,
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w600)),
+                    ),
+                    if (r.entries.isNotEmpty)
+                      Icon(
+                        _open
+                            ? Icons.keyboard_arrow_up
+                            : Icons.keyboard_arrow_down,
+                        color: kMuted,
+                        size: 22,
+                      ),
+                  ],
+                ),
+                if (_open)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8, bottom: 2),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final e in r.entries)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 9, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: (e.present ? kAccent : kAbsent)
+                                    .withValues(alpha: 0.16),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Text(
+                                '${e.label} · ${e.present ? 'P' : 'A'}',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: e.present ? kAccent : kAbsent,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // Subject stats screen (overall, for admin and teacher)
 class SubjectStatsScreen extends StatefulWidget {
   final SemRef sem;
@@ -12643,8 +15792,11 @@ class SubjectStatsScreen extends StatefulWidget {
 
 class _SubjectStatsScreenState extends State<SubjectStatsScreen> {
   bool _loading = true;
-  List<Map<String, String>> _students = [];
-  List<DateRecord> _records = [];
+  List<_StatRow> _rows = [];
+  int _sessions = 0;
+  String _query = '';
+  String _filter = 'all'; // all | low | safe
+  String _sort = 'roll'; // roll | low | high
 
   @override
   void initState() {
@@ -12656,43 +15808,302 @@ class _SubjectStatsScreenState extends State<SubjectStatsScreen> {
     try {
       final studentsF = loadSubjectStudents(widget.sem, widget.subjectName);
       final recordsF = loadDateRecords(widget.sem, widget.subjectName);
-      _students = await studentsF;
-      _records = await recordsF;
+      final students = await studentsF;
+      final records = await recordsF;
+      _sessions = records.length;
+      _rows = [for (final s in students) _buildStatRow(s, records)];
     } catch (e) {
       debugPrint('Stats load error: $e');
     }
     if (mounted) setState(() => _loading = false);
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: Text('${widget.subjectName} - Stats')),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _records.isEmpty
-              ? const EmptyState(
-                  icon: Icons.insights_outlined,
-                  text: 'No attendance records found.')
-              : RefreshIndicator(
-                  onRefresh: _load,
-                  child: ListView(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    padding: const EdgeInsets.only(top: 6, bottom: 24),
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
-                        child: Text(
-                          '${_records.length} session${_records.length == 1 ? '' : 's'} recorded',
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(color: kMuted, fontSize: 13),
-                        ),
-                      ),
-                      for (final st in _students)
-                        buildStudentStatCard(st, _records),
-                    ],
+  Widget _summaryCard() {
+    final n = _rows.length;
+    final safe = _rows.where((r) => r.safe).length;
+    final low = n - safe;
+    final perfect = _rows.where((r) => r.perfect).length;
+    final safeOnly = safe - perfect;
+    final avg =
+        n == 0 ? 0.0 : _rows.fold<double>(0, (s, r) => s + r.pct) / n;
+
+    Widget legend(Color c, String label, int count, Color countColor) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(
+          children: [
+            Container(
+              width: 10,
+              height: 10,
+              decoration: BoxDecoration(color: c, shape: BoxShape.circle),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Colors.white, fontSize: 13.5)),
+            ),
+            Text('$count',
+                style: TextStyle(
+                    color: countColor,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w700)),
+          ],
+        ),
+      );
+    }
+
+    final segs = <MapEntry<int, Color>>[
+      MapEntry(perfect, kViolet),
+      MapEntry(safeOnly, kAccent),
+      MapEntry(low, kAbsent),
+    ].where((e) => e.key > 0).toList();
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF16215F),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: kGlassBorder),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              SizedBox(
+                width: 88,
+                height: 88,
+                child: CustomPaint(
+                  painter: _PanelRingPainter(
+                    value: avg / 100,
+                    color: kAccent,
+                    track: const Color(0xFF3A3A8C),
+                    stroke: 8,
+                  ),
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text('${avg.round()}%',
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 21,
+                                fontWeight: FontWeight.w800,
+                                height: 1.1)),
+                        const Text('Class avg',
+                            style: TextStyle(color: kMuted, fontSize: 11.5)),
+                      ],
+                    ),
                   ),
                 ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    legend(kAccent, 'Safe (75%+)', safe, kAccent),
+                    legend(kAbsent, 'Low (below 75%)', low, kAbsent),
+                    legend(kViolet, 'Perfect 100%', perfect, kViolet),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          if (segs.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: Row(
+                children: [
+                  for (var i = 0; i < segs.length; i++) ...[
+                    if (i > 0) const SizedBox(width: 3),
+                    Expanded(
+                      flex: segs[i].key,
+                      child: Container(height: 7, color: segs[i].value),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _searchRow() {
+    const noBorder = OutlineInputBorder(
+      borderRadius: BorderRadius.all(Radius.circular(14)),
+      borderSide: BorderSide(color: kGlassBorder),
+    );
+    PopupMenuEntry<String> sortItem(String v, String text) => PopupMenuItem<String>(
+          value: v,
+          child: Row(
+            children: [
+              Icon(_sort == v ? Icons.check : null, size: 18, color: kAccent),
+              const SizedBox(width: 8),
+              Text(text),
+            ],
+          ),
+        );
+    return Row(
+      children: [
+        Expanded(
+          child: SizedBox(
+            height: 40,
+            child: TextField(
+              onChanged: (v) => setState(() => _query = v),
+              style: const TextStyle(color: Colors.white, fontSize: 14.5),
+              decoration: const InputDecoration(
+                hintText: 'Search student',
+                hintStyle: TextStyle(color: Color(0x80FFFFFF), fontSize: 14.5),
+                prefixIcon: Icon(Icons.search, color: kMuted),
+                filled: true,
+                fillColor: _kPanelField,
+                isDense: true,
+                contentPadding: EdgeInsets.symmetric(vertical: 10),
+                border: noBorder,
+                enabledBorder: noBorder,
+                focusedBorder: noBorder,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        PopupMenuButton<String>(
+          tooltip: 'Sort',
+          onSelected: (v) => setState(() => _sort = v),
+          itemBuilder: (_) => [
+            sortItem('roll', 'Roll number'),
+            sortItem('low', 'Lowest attendance first'),
+            sortItem('high', 'Highest attendance first'),
+          ],
+          child: Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: _kPanelField,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: kGlassBorder),
+            ),
+            child: const Icon(Icons.swap_vert_rounded, color: kAccent, size: 21),
+          ),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final q = _query.trim().toLowerCase();
+    var list = _rows.where((r) {
+      if (_filter == 'low' && r.safe) return false;
+      if (_filter == 'safe' && !r.safe) return false;
+      if (q.isEmpty) return true;
+      return r.name.toLowerCase().contains(q) ||
+          r.roll.toLowerCase().contains(q) ||
+          rollOf(r.roll).toLowerCase().contains(q);
+    }).toList();
+    if (_sort == 'low') {
+      list.sort((a, b) => a.pct.compareTo(b.pct));
+    } else if (_sort == 'high') {
+      list.sort((a, b) => b.pct.compareTo(a.pct));
+    }
+
+    Widget statPill(String label, String key) => Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: GradPill(
+            label: label,
+            filled: _filter == key,
+            height: 34,
+            fontSize: 13.5,
+            gradient: kBlueGrad,
+            onTap: () => setState(() => _filter = key),
+          ),
+        );
+
+    Widget body;
+    if (_loading) {
+      body = const Center(child: CircularProgressIndicator());
+    } else if (_sessions == 0) {
+      body = const EmptyState(
+          icon: Icons.insights_outlined, text: 'No attendance records found.');
+    } else {
+      body = RefreshIndicator(
+        onRefresh: _load,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(0, 4, 0, 16),
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              child: _summaryCard(),
+            ),
+            const SizedBox(height: 12),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              child: _searchRow(),
+            ),
+            const SizedBox(height: 10),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              child: Row(
+                children: [
+                  statPill('All', 'all'),
+                  statPill('Low', 'low'),
+                  statPill('Safe', 'safe'),
+                ],
+              ),
+            ),
+            const SizedBox(height: 6),
+            if (list.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 32),
+                child: Center(
+                  child: Text('No student matches.',
+                      style: TextStyle(color: kMuted, fontSize: 15)),
+                ),
+              )
+            else
+              for (final r in list) _SubjectStatTile(key: ValueKey(r.roll), row: r),
+          ],
+        ),
+      );
+    }
+
+    return Scaffold(
+      body: Padding(
+        padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top),
+        child: Column(
+          children: [
+            HeaderCard(
+              title: widget.subjectName,
+              subtitle: 'Subject stats',
+              actions: [
+                if (_sessions > 0)
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                    decoration: BoxDecoration(
+                      color: kAccent.withValues(alpha: 0.10),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: kAccent.withValues(alpha: 0.28)),
+                    ),
+                    child: Text(
+                        '$_sessions session${_sessions == 1 ? '' : 's'}',
+                        style: const TextStyle(
+                            color: kAccent,
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700)),
+                  ),
+              ],
+            ),
+            Expanded(child: body),
+          ],
+        ),
+      ),
     );
   }
 }
