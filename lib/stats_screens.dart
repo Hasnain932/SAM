@@ -816,10 +816,8 @@ class _SubjectStatsScreenState extends State<SubjectStatsScreen> {
     } else {
       body = RefreshIndicator(
         onRefresh: _load,
-        child: ListView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.fromLTRB(0, 4, 0, 16),
-          children: [
+        child: Builder(builder: (context) {
+        final head = <Widget>[
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 14),
               child: _summaryCard(),
@@ -868,10 +866,19 @@ class _SubjectStatsScreenState extends State<SubjectStatsScreen> {
                       style: TextStyle(color: kMuted, fontSize: 15)),
                 ),
               )
-            else
-              for (final r in list) _SubjectStatTile(key: ValueKey(r.roll), row: r),
-          ],
-        ),
+        ];
+        // Builder: student tiles are built only when they scroll into view.
+        return ListView.builder(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(0, 4, 0, 16),
+          itemCount: head.length + list.length,
+          itemBuilder: (context, i) {
+            if (i < head.length) return head[i];
+            final r = list[i - head.length];
+            return _SubjectStatTile(key: ValueKey(r.roll), row: r);
+          },
+        );
+        }),
       );
     }
 
@@ -1529,21 +1536,25 @@ class _MonthlyAttendanceScreenState extends State<MonthlyAttendanceScreen> {
     final avg = sum / _students.length;
     final monthKey = DateFormat('yyyy-MM').format(_month);
 
-    return ListView(
+    // Builder: a student card is built only when it scrolls into view.
+    return ListView.builder(
       padding: const EdgeInsets.only(top: 4, bottom: 24),
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
-          child: Text(
-            '${_records.length} session${_records.length == 1 ? '' : 's'} • average ${avg.toStringAsFixed(1)}%',
-            textAlign: TextAlign.center,
-            style: const TextStyle(color: kMuted, fontSize: 13),
-          ),
-        ),
-        for (final s in _students)
-          buildStudentStatCard(s, _records,
-              key: ValueKey('$monthKey-${s['roll']}')),
-      ],
+      itemCount: _students.length + 1,
+      itemBuilder: (context, i) {
+        if (i == 0) {
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+            child: Text(
+              '${_records.length} session${_records.length == 1 ? '' : 's'} • average ${avg.toStringAsFixed(1)}%',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: kMuted, fontSize: 13),
+            ),
+          );
+        }
+        final s = _students[i - 1];
+        return buildStudentStatCard(s, _records,
+            key: ValueKey('$monthKey-${s['roll']}'));
+      },
     );
   }
 

@@ -40,8 +40,9 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
   String examPhase = kPhaseMid; // current Mid / Final phase of this subject
   String sessionPhase = kPhaseMid; // phase the selected session is saved with
   bool _phaseChangedLocally = false;
-  // What the admin has announced (Mid = nothing to do, Final = switch now).
-  String announcedPhase = kPhaseMid;
+  // What the admin has announced (null = nothing announced yet). A teacher whose
+  // subject is in the other phase must switch before taking new attendance.
+  String? announcedPhase;
   bool _announceFromServer = false;
 
   // All records of this subject, loaded once and reused for the selected date,
@@ -91,19 +92,22 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       // Trust the announcement when the field is there, or when the server
       // says it was never set. An empty offline cache must not reset it.
       String? a;
+      var known = false;
       if (data != null && data.containsKey(kAnnouncedPhaseField)) {
         a = announcedPhaseFrom(data);
+        known = true;
       } else if (!s.metadata.isFromCache) {
-        a = kPhaseMid;
+        a = null; // server says: nothing announced
+        known = true;
       }
-      if (a != null) {
+      if (known) {
         _announceFromServer = true;
         if (a != announcedPhase) unawaited(cacheAnnouncedPhase(a));
       }
-      if (mounted && (p != perms || (a != null && a != announcedPhase))) {
+      if (mounted && (p != perms || (known && a != announcedPhase))) {
         setState(() {
           perms = p;
-          if (a != null) announcedPhase = a;
+          if (known) announcedPhase = a;
         });
       }
     }, onError: (_) {});
@@ -292,6 +296,8 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       return;
     }
 
+    if (!_guardPhase()) return;
+
     final docId = _getDocumentId();
 
     final data = <String, dynamic>{
@@ -323,7 +329,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
     };
 
     // Not awaited: this never completes while offline.
-    unawaited(_datesRef.doc(docId).set(data).catchError((_) {}));
+    unawaited(_datesRef.doc(docId).set(stamped(data)).catchError((_) {}));
     unawaited(LocalDb.saveAttendance(
       widget.sem,
       widget.subjectName,
@@ -471,7 +477,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       };
 
       // Not awaited: this never completes while offline.
-      unawaited(_datesRef.doc(docId).set(data).catchError((_) {}));
+      unawaited(_datesRef.doc(docId).set(stamped(data)).catchError((_) {}));
       await LocalDb.saveAttendance(
         widget.sem,
         widget.subjectName,
@@ -616,13 +622,50 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
     if (mounted) showSnack(context, 'Subject is now in $name phase.');
   }
 
-  // Teachers only: the admin announced the Final phase but this subject is still
-  // in Mid. Shows every time the subject is opened until the teacher switches it
-  // to Final (or the admin announces Mid again).
+  // Teachers only: the phase the admin announced, when this subject is still in
+  // the other phase (null = nothing to do). Shows every time the subject is opened
+  // until the teacher switches it (or the admin announces the other phase again).
+  String? get _pendingSwitch {
+    final a = announcedPhase;
+    if (_isAdmin || a == null || a == examPhase) return null;
+    return a;
+  }
+
+  // Stops NEW attendance (Present / Absent / Mark all / Save) while a phase switch
+  // is pending, and shows the reminder again with a Switch button.
+  // Returns true when marking may go on.
+  bool _guardPhase() {
+    final target = _pendingSwitch;
+    if (target == null || existingRecord) return true;
+    final name = phaseLabel(target);
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Switch to $name first'),
+        content: Text(
+            'The admin has announced the $name phase. Please switch this subject to $name before taking attendance.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Later'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _confirmSwitchPhase(target);
+            },
+            child: Text('Switch to $name'),
+          ),
+        ],
+      ),
+    );
+    return false;
+  }
+
   Widget _finalReminderBanner() {
-    if (_isAdmin || announcedPhase != kPhaseFinal || examPhase != kPhaseMid) {
-      return const SizedBox.shrink();
-    }
+    final target = _pendingSwitch;
+    if (target == null) return const SizedBox.shrink();
+    final toFinal = target == kPhaseFinal;
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 4, 16, 4),
       padding: const EdgeInsets.all(12),
@@ -634,16 +677,21 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Row(
+          Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(Icons.campaign_outlined, color: kViolet, size: 20),
-              SizedBox(width: 10),
+              const Icon(Icons.campaign_outlined, color: kViolet, size: 20),
+              const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  'The Mid phase has ended and the Final phase has started. '
-                  'Please switch this subject from Mid to Final.',
-                  style: TextStyle(fontSize: 13),
+                  toFinal
+                      ? 'The Mid phase has ended and the Final phase has started. '
+                          'Please switch this subject from Mid to Final. '
+                          'You cannot take attendance until you do.'
+                      : 'The Final phase has ended and the Mid phase has started. '
+                          'Please switch this subject from Final to Mid. '
+                          'You cannot take attendance until you do.',
+                  style: const TextStyle(fontSize: 13),
                 ),
               ),
             ],
@@ -652,11 +700,11 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
           Align(
             alignment: Alignment.centerRight,
             child: GradPill(
-              label: 'Switch to Final',
-              icon: Icons.emoji_events_outlined,
+              label: toFinal ? 'Switch to Final' : 'Switch to Mid',
+              icon: toFinal ? Icons.emoji_events_outlined : Icons.flag_outlined,
               height: 36,
               enabled: _canEdit,
-              onTap: _canEdit ? () => _confirmSwitchPhase(kPhaseFinal) : null,
+              onTap: _canEdit ? () => _confirmSwitchPhase(target) : null,
             ),
           ),
         ],
@@ -962,11 +1010,14 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                           label: 'All Present',
                           enabled: canEdit,
                           onTap: canEdit
-                              ? () => setState(() {
+                              ? () {
+                                  if (!_guardPhase()) return;
+                                  setState(() {
                                     for (final st in students) {
                                       attendanceStatus[st['roll']!] = 'P';
                                     }
-                                  })
+                                  });
+                                }
                               : null,
                         ),
                         const SizedBox(width: 8),
@@ -975,11 +1026,14 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                           gradient: kRedGrad,
                           enabled: canEdit,
                           onTap: canEdit
-                              ? () => setState(() {
+                              ? () {
+                                  if (!_guardPhase()) return;
+                                  setState(() {
                                     for (final st in students) {
                                       attendanceStatus[st['roll']!] = 'A';
                                     }
-                                  })
+                                  });
+                                }
                               : null,
                         ),
                       ],
@@ -1054,8 +1108,11 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                                                 'P',
                                         color: kPresent,
                                         onTap: canEdit
-                                            ? () => setState(() =>
-                                                attendanceStatus[roll] = 'P')
+                                            ? () {
+                                                if (!_guardPhase()) return;
+                                                setState(() =>
+                                                    attendanceStatus[roll] = 'P');
+                                              }
                                             : null,
                                       ),
                                       const SizedBox(width: 8),
@@ -1066,8 +1123,11 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                                                 'A',
                                         color: kAbsent,
                                         onTap: canEdit
-                                            ? () => setState(() =>
-                                                attendanceStatus[roll] = 'A')
+                                            ? () {
+                                                if (!_guardPhase()) return;
+                                                setState(() =>
+                                                    attendanceStatus[roll] = 'A');
+                                              }
                                             : null,
                                       ),
                                     ],
@@ -1262,7 +1322,7 @@ class _ManageAttendanceScreenState extends State<ManageAttendanceScreen> {
               unawaited(sem
                   .dates(subjectName)
                   .doc(docId)
-                  .update({'_type': newType}).catchError((_) {}));
+                  .update(stamped({'_type': newType})).catchError((_) {}));
               unawaited(LocalDb.setSessionType(sem, subjectName, docId, newType));
               unawaited(refreshSubjectSummary(sem, subjectName, tweak: (l) {
                 final i = l.indexWhere((r) => r.id == docId);
@@ -1302,7 +1362,7 @@ class _ManageAttendanceScreenState extends State<ManageAttendanceScreen> {
               unawaited(sem
                   .dates(subjectName)
                   .doc(docId)
-                  .update({'_phase': newPhase}).catchError((_) {}));
+                  .update(stamped({'_phase': newPhase})).catchError((_) {}));
               unawaited(LocalDb.setSessionPhase(sem, subjectName, docId, newPhase));
               if (context.mounted) {
                 showSnack(context, '$label is now ${phaseLabel(newPhase)}');
@@ -1325,7 +1385,7 @@ class _ManageAttendanceScreenState extends State<ManageAttendanceScreen> {
       unawaited(sem
           .dates(subjectName)
           .doc(r.id)
-          .set({roll: status}, SetOptions(merge: true)).catchError((_) {}));
+          .set(stamped({roll: status}), SetOptions(merge: true)).catchError((_) {}));
     }
     unawaited(LocalDb.setStudentStatusAll(sem, subjectName, roll, status));
     unawaited(refreshSubjectSummary(sem, subjectName, tweak: (l) {
@@ -1872,9 +1932,7 @@ class _ManageAttendanceScreenState extends State<ManageAttendanceScreen> {
                         ),
                       );
 
-                  return ListView(
-                    padding: const EdgeInsets.fromLTRB(0, 4, 0, 14),
-                    children: [
+                  final listItems = <Widget>[
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 14),
                         child: Row(
@@ -1914,7 +1972,12 @@ class _ManageAttendanceScreenState extends State<ManageAttendanceScreen> {
                         )
                       else
                         ...children,
-                    ],
+                  ];
+                  // Builder: only the cards on screen are laid out and painted.
+                  return ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(0, 4, 0, 14),
+                    itemCount: listItems.length,
+                    itemBuilder: (context, i) => listItems[i],
                   );
                 },
               ),

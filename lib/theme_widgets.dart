@@ -187,7 +187,7 @@ class AppCard extends StatefulWidget {
   final EdgeInsetsGeometry padding;
   final EdgeInsetsGeometry margin;
   final double radius;
-  final double blur;
+  final double blur; // 0 = no blur (default; a BackdropFilter per card is slow)
   final bool float; // soft floating + fade-in; off everywhere except where asked
   final Color? borderColor; // optional custom border (e.g. low attendance)
   final bool subtle; // plain dark fill instead of the blue gradient (long lists)
@@ -198,7 +198,7 @@ class AppCard extends StatefulWidget {
     this.padding = const EdgeInsets.all(14),
     this.margin = const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
     this.radius = 20,
-    this.blur = 10,
+    this.blur = 0,
     this.float = false,
     this.borderColor,
     this.subtle = false,
@@ -233,8 +233,9 @@ class _AppCardState extends State<AppCard> {
       padding: widget.margin,
       child: ClipRRect(
         borderRadius: r,
-        // Web: no blur (a BackdropFilter per card is slow, and barely visible here).
-        child: kIsWeb
+        // Blur only when a card asks for it explicitly: a BackdropFilter per card
+        // makes long lists slow on phones and is barely visible on this background.
+        child: (kIsWeb || widget.subtle || widget.blur <= 0)
             ? card
             : BackdropFilter(
                 filter: ImageFilter.blur(sigmaX: widget.blur, sigmaY: widget.blur),

@@ -532,10 +532,12 @@ class _StudentLoginsScreenState extends State<StudentLoginsScreen> {
       body = const EmptyState(
           icon: Icons.groups_outlined, text: 'Add students first.');
     } else {
-      body = ListView(
+      body = ListView.builder(
         padding: const EdgeInsets.only(top: 6, bottom: 24),
-        children: [
-          Padding(
+        itemCount: _students.length + 1,
+        itemBuilder: (context, i) {
+          if (i == 0) {
+            return Padding(
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 10),
             child: GradientButton(
               label: missing == 0
@@ -544,9 +546,10 @@ class _StudentLoginsScreenState extends State<StudentLoginsScreen> {
               loading: _busy,
               onPressed: (_busy || missing == 0) ? null : () => _create(),
             ),
-          ),
-          for (final st in _students)
-            AppCard(
+            );
+          }
+          final st = _students[i - 1];
+          return AppCard(
               float: false,
               margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
               padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
@@ -574,8 +577,8 @@ class _StudentLoginsScreenState extends State<StudentLoginsScreen> {
                   ),
                 ],
               ),
-            ),
-        ],
+            );
+        },
       );
     }
     return Scaffold(

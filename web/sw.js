@@ -55,12 +55,40 @@ async function clean(res) {
   });
 }
 
+// Look for the same file in the caches of the previous version.
+async function findOld(href, oldKeys) {
+  for (const key of oldKeys) {
+    try {
+      const c = await caches.open(key);
+      const r = await c.match(href);
+      if (r) return r;
+    } catch (e) {
+      // ignore
+    }
+  }
+  return null;
+}
+
 // Download one file fresh and keep it.
 // - Network error: throws (so a half-finished update never replaces a good one).
 // - File not found: skipped.
 // - Other bad status: throws for shell files, skipped for the rest.
-async function store(cache, href, strict) {
-  const res = await fetch(new Request(href, { cache: 'no-cache' }));
+// - `old` (optional): the copy from the previous version. The server is asked
+//   "did it change?" (ETag / Last-Modified). If not (304), the old copy is kept and
+//   nothing is downloaded, so an update only transfers the files that really changed.
+async function store(cache, href, strict, old) {
+  const headers = new Headers();
+  if (old) {
+    const etag = old.headers.get('etag');
+    const lastMod = old.headers.get('last-modified');
+    if (etag) headers.set('If-None-Match', etag);
+    else if (lastMod) headers.set('If-Modified-Since', lastMod);
+  }
+  const res = await fetch(new Request(href, { cache: 'no-cache', headers }));
+  if (res.status === 304 && old) {
+    await cache.put(href, await clean(old));
+    return;
+  }
   if (!res.ok) {
     if (strict && res.status !== 404) throw new Error('bad status ' + res.status + ' ' + href);
     return;
@@ -102,8 +130,10 @@ self.addEventListener('install', (event) => {
       });
 
       // Plus every file the old version had cached.
+      const oldKeys = [];
       for (const key of await caches.keys()) {
         if (key === VERSION || !key.startsWith('sam-')) continue;
+        oldKeys.push(key);
         const old = await caches.open(key);
         for (const req of await old.keys()) {
           const u = new URL(req.url);
@@ -112,9 +142,13 @@ self.addEventListener('install', (event) => {
       }
 
       const jobs = [];
-      shell.forEach((href) => jobs.push(() => store(cache, href, true)));
+      shell.forEach((href) =>
+        jobs.push(async () => store(cache, href, true, await findOld(href, oldKeys)))
+      );
       others.forEach((href) => {
-        if (!shell.has(href)) jobs.push(() => store(cache, href, false));
+        if (!shell.has(href)) {
+          jobs.push(async () => store(cache, href, false, await findOld(href, oldKeys)));
+        }
       });
       await runPool(jobs, 3);
 

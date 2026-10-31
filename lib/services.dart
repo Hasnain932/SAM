@@ -452,6 +452,14 @@ class ParsedAttendance {
   ParsedAttendance(this.status, this.meta);
 }
 
+// Every write to an attendance document ('dates' collection) also stores the server
+// time in this field. The local database uses it to download only the sessions that
+// changed since the last sync (delta sync). parseAttendance ignores it (not a String).
+const String kUpdatedField = '_updated';
+
+Map<String, dynamic> stamped(Map<String, dynamic> data) =>
+    {...data, kUpdatedField: FieldValue.serverTimestamp()};
+
 ParsedAttendance parseAttendance(Map<String, dynamic> data) {
   final status = <String, String>{};
   final meta = <String, String>{};
@@ -701,30 +709,39 @@ Future<void> saveSubjectPhase(SemRef s, String subject, String phase) async {
 }
 
 // ---- Admin's Mid / Final announcement ----
-// Stored as the field 'announced_phase' of settings/permissions (the document
+// The admin can announce either phase. Teachers whose subject is NOT in the
+// announced phase see a reminder and cannot take new attendance until they switch.
+// Stored as the field 'announced_phase_v2' of settings/permissions (the document
 // every teacher screen already listens to) and mirrored locally, so the reminder
-// also shows offline and after an app restart. Missing = Mid (nothing announced).
-const String kAnnouncedPhaseField = 'announced_phase';
-const String _kAnnouncedPrefKey = 'announced_exam_phase';
+// also shows offline and after an app restart. Missing = nothing announced (null).
+// (A new field name is used on purpose: the old 'announced_phase' field meant
+// "Mid = nothing to do", and must not trigger "switch back to Mid" reminders.)
+const String kAnnouncedPhaseField = 'announced_phase_v2';
+const String _kAnnouncedPrefKey = 'announced_exam_phase_v2';
 
-String announcedPhaseFrom(Map<String, dynamic>? d) =>
-    d?[kAnnouncedPhaseField] == kPhaseFinal ? kPhaseFinal : kPhaseMid;
+String? announcedPhaseFrom(Map<String, dynamic>? d) {
+  final v = d?[kAnnouncedPhaseField];
+  return (v == kPhaseFinal || v == kPhaseMid) ? v as String : null;
+}
 
-Future<String> readLocalAnnouncedPhase() async {
+Future<String?> readLocalAnnouncedPhase() async {
   try {
     final p = await SharedPreferences.getInstance();
-    return p.getString(_kAnnouncedPrefKey) == kPhaseFinal
-        ? kPhaseFinal
-        : kPhaseMid;
+    final v = p.getString(_kAnnouncedPrefKey);
+    return (v == kPhaseFinal || v == kPhaseMid) ? v : null;
   } catch (_) {
-    return kPhaseMid;
+    return null;
   }
 }
 
-Future<void> cacheAnnouncedPhase(String phase) async {
+Future<void> cacheAnnouncedPhase(String? phase) async {
   try {
     final p = await SharedPreferences.getInstance();
-    await p.setString(_kAnnouncedPrefKey, phase);
+    if (phase == null) {
+      await p.remove(_kAnnouncedPrefKey);
+    } else {
+      await p.setString(_kAnnouncedPrefKey, phase);
+    }
   } catch (_) {}
 }
 
@@ -1412,7 +1429,7 @@ Future<void> renameSubjectEverywhere(
     for (final d in overrides.docs)
       (b) => b.set(sem.overrides(newName).doc(d.id), d.data()),
     for (final d in dates.docs)
-      (b) => b.set(sem.dates(newName).doc(d.id), d.data()),
+      (b) => b.set(sem.dates(newName).doc(d.id), stamped(d.data())),
   ];
   await _commitInChunks(copyOps);
 
@@ -1477,6 +1494,7 @@ Future<String> changeStudentRoll(
       ops.add((b) => b.update(d.reference, <Object, Object?>{
             newField: v,
             oldField: FieldValue.delete(),
+            kUpdatedField: FieldValue.serverTimestamp(),
           }));
     }
     // subject-level override of this student

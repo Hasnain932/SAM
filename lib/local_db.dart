@@ -5,7 +5,7 @@ part of 'main.dart';
 // Backup: reads every Firestore document into one JSON file (saved on the phone
 // or downloaded on web). Restore: writes each document back to its path. It never
 // deletes anything, and running it twice is harmless.
-// ---------------------------------------------------------------------------
+//---------------------------------------------------------------------------
 const String kBackupFormat = 'attendance_backup_v1';
 const List<String> _kBackupRoots = ['departments', 'teachers', 'settings', 'meta'];
 const List<String> _kBackupGroups = [
@@ -49,30 +49,76 @@ dynamic _bkDecode(dynamic v) {
   return v;
 }
 
-Future<Map<String, dynamic>> _collectBackup() async {
+// Result of a backup run: the finished JSON file and how many records it holds.
+class _BackupResult {
+  final Uint8List bytes;
+  final int count;
+  _BackupResult(this.bytes, this.count);
+}
+
+// Builds the backup JSON piece by piece. Every document is encoded and appended to
+// one byte buffer right away, so there is never a second full copy (map + string +
+// bytes) in memory. Big collection groups are read in pages of 500 documents; if
+// the server refuses paging for a group, that group is read in one go instead.
+// The file layout is the same as before, so old backups still restore.
+Future<_BackupResult> _collectBackupBytes() async {
   final fs = FirebaseFirestore.instance;
   const t = Duration(seconds: 60);
-  final docs = <String, dynamic>{};
-  void addAll(QuerySnapshot<Map<String, dynamic>> snap) {
+  const pageSize = 500;
+  final out = BytesBuilder(copy: false);
+  final seen = <String>{};
+  var count = 0;
+  var first = true;
+
+  void put(String path, Map<String, dynamic> data) {
+    if (!seen.add(path)) return; // the same document can come from two queries
+    out.add(utf8.encode(
+        '${first ? '' : ','}${jsonEncode(path)}:${jsonEncode(_bkEncode(data))}'));
+    first = false;
+    count++;
+  }
+
+  void addSnap(QuerySnapshot<Map<String, dynamic>> snap) {
     // A cached answer would give an incomplete backup, so refuse it.
     if (snap.metadata.isFromCache) throw Exception('Server not reachable');
     for (final d in snap.docs) {
-      docs[d.reference.path] = _bkEncode(d.data());
+      put(d.reference.path, d.data());
     }
   }
 
+  // Header is written first; the final count is not known yet, so it is written at
+  // the end (a "count" key after "docs" is fine for JSON readers).
+  out.add(utf8.encode('{"format":${jsonEncode(kBackupFormat)},'
+      '"created":${jsonEncode(DateTime.now().toIso8601String())},"docs":{'));
+
   for (final c in _kBackupRoots) {
-    addAll(await fs.collection(c).get().timeout(t));
+    addSnap(await fs.collection(c).get().timeout(t));
   }
   for (final g in _kBackupGroups) {
-    addAll(await fs.collectionGroup(g).get().timeout(t));
+    var paged = true;
+    try {
+      QueryDocumentSnapshot<Map<String, dynamic>>? last;
+      while (true) {
+        var q = fs
+            .collectionGroup(g)
+            .orderBy(FieldPath.documentId)
+            .limit(pageSize);
+        if (last != null) q = q.startAfterDocument(last);
+        final snap = await q.get().timeout(t);
+        addSnap(snap);
+        if (snap.docs.length < pageSize) break;
+        last = snap.docs.last;
+      }
+    } catch (e) {
+      if (e.toString().contains('Server not reachable')) rethrow;
+      paged = false;
+    }
+    if (!paged) {
+      addSnap(await fs.collectionGroup(g).get().timeout(t));
+    }
   }
-  return {
-    'format': kBackupFormat,
-    'created': DateTime.now().toIso8601String(),
-    'count': docs.length,
-    'docs': docs,
-  };
+  out.add(utf8.encode('},"count":$count}'));
+  return _BackupResult(out.takeBytes(), count);
 }
 
 // Web: opens the share sheet. Browsers only allow sharing within a few
@@ -135,8 +181,8 @@ Future<void> webShareOrDownload(
 
 // Creates the backup file and saves/shares it. Returns the number of records.
 Future<int> createBackupFile([BuildContext? context]) async {
-  final data = await _collectBackup();
-  final bytes = Uint8List.fromList(utf8.encode(jsonEncode(data)));
+  final result = await _collectBackupBytes();
+  final bytes = result.bytes;
   final name =
       'attendance_backup_${DateFormat('yyyy-MM-dd_HH-mm').format(DateTime.now())}.json';
   if (kIsWeb) {
@@ -146,7 +192,7 @@ Future<int> createBackupFile([BuildContext? context]) async {
     } else {
       await saveOrShareBytes(bytes, name, text: 'Attendance backup');
     }
-    return data['count'] as int;
+    return result.count;
   }
   final dir = await getApplicationDocumentsDirectory();
   final path = '${dir.path}/$name';
@@ -155,7 +201,7 @@ Future<int> createBackupFile([BuildContext? context]) async {
     files: [XFile(path)],
     text: 'Attendance backup',
   ));
-  return data['count'] as int;
+  return result.count;
 }
 
 Future<void> runBackupWithUi(BuildContext context) async {
@@ -282,8 +328,11 @@ Future<void> restoreFromBackupUi(BuildContext context) async {
     for (int i = 0; i < entries.length; i += 400) {
       final batch = fs.batch();
       for (final e in entries.skip(i).take(400)) {
-        batch.set(fs.doc(e.key),
-            Map<String, dynamic>.from(_bkDecode(e.value) as Map));
+        var m = Map<String, dynamic>.from(_bkDecode(e.value) as Map);
+        // Restored attendance gets a fresh update time, so other devices (delta
+        // sync) notice that it changed.
+        if (e.key.contains('/dates/')) m = stamped(m);
+        batch.set(fs.doc(e.key), m);
       }
       await batch.commit().timeout(const Duration(seconds: 30));
     }
@@ -408,6 +457,7 @@ class LocalDb {
 
   static const List<String> _tables = [
     'attendance',
+    'sessions',
     'overrides',
     'claims',
     'subjects',
@@ -428,12 +478,53 @@ class LocalDb {
         'CREATE TABLE subjects (dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, name TEXT NOT NULL, claimed_by TEXT, claimed_by_name TEXT, PRIMARY KEY (dept_id, section, semester, name))');
     await db.execute(
         'CREATE TABLE overrides (dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, subject TEXT NOT NULL, roll TEXT NOT NULL, name TEXT, kind TEXT, father TEXT DEFAULT \'\', PRIMARY KEY (dept_id, section, semester, subject, roll))');
+    // v6: per-session details (who / when / type / phase) live once in `sessions`;
+    // `attendance` keeps only roll + status, so every student row is much smaller.
     await db.execute(
-        'CREATE TABLE attendance (dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, subject TEXT NOT NULL, session_id TEXT NOT NULL, roll TEXT NOT NULL, status TEXT, marked_time TEXT, marked_by TEXT, marked_by_name TEXT, session_type TEXT, exam_phase TEXT DEFAULT \'mid\', PRIMARY KEY (dept_id, section, semester, subject, session_id, roll))');
+        'CREATE TABLE sessions (dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, subject TEXT NOT NULL, session_id TEXT NOT NULL, marked_time TEXT, marked_by TEXT, marked_by_name TEXT, session_type TEXT, exam_phase TEXT DEFAULT \'mid\', PRIMARY KEY (dept_id, section, semester, subject, session_id))');
+    await db.execute(
+        'CREATE TABLE attendance (dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, subject TEXT NOT NULL, session_id TEXT NOT NULL, roll TEXT NOT NULL, status TEXT, PRIMARY KEY (dept_id, section, semester, subject, session_id, roll))');
     await db.execute(
         'CREATE TABLE teachers (teacher_id TEXT PRIMARY KEY, name TEXT, username TEXT)');
     await db.execute(
         'CREATE TABLE claims (teacher_id TEXT NOT NULL, dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, subject TEXT NOT NULL, PRIMARY KEY (teacher_id, dept_id, section, semester, subject))');
+    await _createIndexes(db);
+  }
+
+  // Extra indexes for the lookups the primary keys do not cover (per-student
+  // queries / renames, claimed-by lookups, department deletes). Safe to run twice.
+  static Future<void> _createIndexes(sql.Database db) async {
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_att_roll ON attendance (dept_id, section, semester, subject, roll)');
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_att_semroll ON attendance (dept_id, section, semester, roll)');
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_overrides_roll ON overrides (dept_id, section, semester, roll)');
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_subjects_claimed ON subjects (claimed_by)');
+    await db.execute(
+        'CREATE INDEX IF NOT EXISTS idx_claims_subject ON claims (dept_id, section, semester, subject)');
+  }
+
+  // v5 -> v6: move the per-session columns out of `attendance` into `sessions`.
+  static Future<void> _migrateToSessions(sql.Database db) async {
+    await db.execute(
+        'CREATE TABLE IF NOT EXISTS sessions (dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, subject TEXT NOT NULL, session_id TEXT NOT NULL, marked_time TEXT, marked_by TEXT, marked_by_name TEXT, session_type TEXT, exam_phase TEXT DEFAULT \'mid\', PRIMARY KEY (dept_id, section, semester, subject, session_id))');
+    await db.execute('''
+INSERT OR REPLACE INTO sessions
+  (dept_id, section, semester, subject, session_id, marked_time, marked_by, marked_by_name, session_type, exam_phase)
+SELECT dept_id, section, semester, subject, session_id,
+  COALESCE(MAX(marked_time), ''), COALESCE(MAX(marked_by), ''),
+  COALESCE(MAX(marked_by_name), ''), COALESCE(MAX(session_type), 'class'),
+  COALESCE(MAX(exam_phase), 'mid')
+FROM attendance
+GROUP BY dept_id, section, semester, subject, session_id''');
+    await db.execute(
+        'CREATE TABLE attendance_new (dept_id TEXT NOT NULL, section TEXT NOT NULL, semester TEXT NOT NULL, subject TEXT NOT NULL, session_id TEXT NOT NULL, roll TEXT NOT NULL, status TEXT, PRIMARY KEY (dept_id, section, semester, subject, session_id, roll))');
+    await db.execute(
+        'INSERT OR REPLACE INTO attendance_new (dept_id, section, semester, subject, session_id, roll, status) SELECT dept_id, section, semester, subject, session_id, roll, status FROM attendance');
+    await db.execute('DROP TABLE attendance');
+    await db.execute('ALTER TABLE attendance_new RENAME TO attendance');
   }
 
   static Future<sql.Database> _open() async {
@@ -441,7 +532,7 @@ class LocalDb {
     final path = await filePath();
     _db = await sql.openDatabase(
       path,
-      version: 5,
+      version: 6,
       onCreate: (db, version) async => _createAll(db),
       // v1 -> v2: the structure changed. The local DB is only a Firestore copy, so drop
       // the old tables and recreate them; data refills when online.
@@ -469,6 +560,11 @@ class LocalDb {
         if (oldV < 5) {
           await db.execute(
               "ALTER TABLE attendance ADD COLUMN exam_phase TEXT DEFAULT 'mid'");
+        }
+        // v5 -> v6: separate `sessions` table + extra indexes.
+        if (oldV < 6) {
+          await _migrateToSessions(db);
+          await _createIndexes(db);
         }
       },
     );
@@ -499,7 +595,7 @@ class LocalDb {
   static Future<void> deleteDepartment(String deptId) {
     return _run((db) async {
       await db.transaction((txn) async {
-        for (final t in ['attendance', 'overrides', 'subjects', 'students', 'semesters']) {
+        for (final t in ['attendance', 'sessions', 'overrides', 'subjects', 'students', 'semesters']) {
           await txn.delete(t, where: 'dept_id = ?', whereArgs: [deptId]);
         }
         await txn.delete('claims', where: 'dept_id = ?', whereArgs: [deptId]);
@@ -600,6 +696,7 @@ class LocalDb {
             'dept_id = ? AND section = ? AND semester = ? AND subject = ?';
         final args = [s.deptId, s.section, s.semester, name];
         await txn.delete('attendance', where: w, whereArgs: args);
+        await txn.delete('sessions', where: w, whereArgs: args);
         await txn.delete('overrides', where: w, whereArgs: args);
         await txn.delete('claims', where: w, whereArgs: args);
         await txn.delete('subjects',
@@ -641,6 +738,9 @@ class LocalDb {
   }
 
   // ---------------- attendance ----------------
+  // Saves one session. Only the rows that really changed are written: the session
+  // details go to `sessions`, new / changed students are inserted, and students
+  // that are no longer in the session are removed.
   static Future<void> saveAttendance(
     SemRef s,
     String subject,
@@ -654,12 +754,50 @@ class LocalDb {
   }) {
     return _run((db) async {
       await db.transaction((txn) async {
-        await txn.delete('attendance',
-            where:
-                'dept_id = ? AND section = ? AND semester = ? AND subject = ? AND session_id = ?',
-            whereArgs: [s.deptId, s.section, s.semester, subject, sessionId]);
+        const w =
+            'dept_id = ? AND section = ? AND semester = ? AND subject = ? AND session_id = ?';
+        final args = [s.deptId, s.section, s.semester, subject, sessionId];
+
+        // A session without any student has no record (same as Firestore).
+        if (status.isEmpty) {
+          await txn.delete('attendance', where: w, whereArgs: args);
+          await txn.delete('sessions', where: w, whereArgs: args);
+          return;
+        }
+
+        await txn.insert(
+          'sessions',
+          {
+            'dept_id': s.deptId,
+            'section': s.section,
+            'semester': s.semester,
+            'subject': subject,
+            'session_id': sessionId,
+            'marked_time': time ?? '',
+            'marked_by': markedBy ?? '',
+            'marked_by_name': markedByName ?? '',
+            'session_type': sessionType,
+            'exam_phase': phase,
+          },
+          conflictAlgorithm: sql.ConflictAlgorithm.replace,
+        );
+
+        final existingRows = await txn.query('attendance',
+            columns: ['roll', 'status'], where: w, whereArgs: args);
+        final existing = <String, String>{
+          for (final r in existingRows)
+            (r['roll'] ?? '').toString(): (r['status'] ?? '').toString()
+        };
+
         final batch = txn.batch();
+        for (final roll in existing.keys) {
+          if (!status.containsKey(roll)) {
+            batch.delete('attendance',
+                where: '$w AND roll = ?', whereArgs: [...args, roll]);
+          }
+        }
         status.forEach((roll, st) {
+          if (existing[roll] == st) return; // unchanged, nothing to write
           batch.insert(
             'attendance',
             {
@@ -670,11 +808,6 @@ class LocalDb {
               'session_id': sessionId,
               'roll': roll,
               'status': st,
-              'marked_time': time ?? '',
-              'marked_by': markedBy ?? '',
-              'marked_by_name': markedByName ?? '',
-              'session_type': sessionType,
-              'exam_phase': phase,
             },
             conflictAlgorithm: sql.ConflictAlgorithm.replace,
           );
@@ -688,7 +821,7 @@ class LocalDb {
   static Future<void> setSessionType(
       SemRef s, String subject, String sessionId, String type) {
     return _run((db) async {
-      await db.update('attendance', {'session_type': type},
+      await db.update('sessions', {'session_type': type},
           where:
               'dept_id = ? AND section = ? AND semester = ? AND subject = ? AND session_id = ?',
           whereArgs: [s.deptId, s.section, s.semester, subject, sessionId]);
@@ -699,7 +832,7 @@ class LocalDb {
   static Future<void> setSessionPhase(
       SemRef s, String subject, String sessionId, String phase) {
     return _run((db) async {
-      await db.update('attendance', {'exam_phase': phase},
+      await db.update('sessions', {'exam_phase': phase},
           where:
               'dept_id = ? AND section = ? AND semester = ? AND subject = ? AND session_id = ?',
           whereArgs: [s.deptId, s.section, s.semester, subject, sessionId]);
@@ -707,21 +840,18 @@ class LocalDb {
   }
 
   // Marks one student Present ('P') or Absent ('A') in every saved session of a
-  // subject. A session where the student has no row yet gets one (copying that
-  // session's time / marked-by / type / phase), so the whole past record changes.
+  // subject. A session where the student has no row yet gets one, so the whole
+  // past record changes.
   static Future<void> setStudentStatusAll(
       SemRef s, String subject, String roll, String status) {
     return _run((db) async {
       await db.transaction((txn) async {
-        final rows = await txn.query('attendance',
+        final sessions = await txn.query('sessions',
+            columns: ['session_id'],
             where: '$_semWhere AND subject = ?',
             whereArgs: [..._semArgs(s), subject]);
-        final sessions = <String, Map<String, Object?>>{};
-        for (final r in rows) {
-          sessions.putIfAbsent((r['session_id'] ?? '').toString(), () => r);
-        }
         final batch = txn.batch();
-        sessions.forEach((sessionId, r) {
+        for (final r in sessions) {
           batch.insert(
             'attendance',
             {
@@ -729,18 +859,13 @@ class LocalDb {
               'section': s.section,
               'semester': s.semester,
               'subject': subject,
-              'session_id': sessionId,
+              'session_id': (r['session_id'] ?? '').toString(),
               'roll': roll,
               'status': status,
-              'marked_time': r['marked_time'] ?? '',
-              'marked_by': r['marked_by'] ?? '',
-              'marked_by_name': r['marked_by_name'] ?? '',
-              'session_type': r['session_type'] ?? kTypeClass,
-              'exam_phase': r['exam_phase'] ?? kPhaseMid,
             },
             conflictAlgorithm: sql.ConflictAlgorithm.replace,
           );
-        });
+        }
         await batch.commit(noResult: true);
       });
     });
@@ -749,10 +874,13 @@ class LocalDb {
   static Future<void> deleteAttendance(
       SemRef s, String subject, String sessionId) {
     return _run((db) async {
-      await db.delete('attendance',
-          where:
-              'dept_id = ? AND section = ? AND semester = ? AND subject = ? AND session_id = ?',
-          whereArgs: [s.deptId, s.section, s.semester, subject, sessionId]);
+      const w =
+          'dept_id = ? AND section = ? AND semester = ? AND subject = ? AND session_id = ?';
+      final args = [s.deptId, s.section, s.semester, subject, sessionId];
+      await db.transaction((txn) async {
+        await txn.delete('attendance', where: w, whereArgs: args);
+        await txn.delete('sessions', where: w, whereArgs: args);
+      });
     });
   }
 
@@ -811,20 +939,64 @@ class LocalDb {
 
   // Rebuilds SQLite from Firestore. collectionGroup fetches each collection in one
   // query; the document path gives the department / section / semester.
-  static Future<bool> replaceAllFromFirestore() async {
+  //
+  // full: true  = rebuild everything (also removes anything deleted elsewhere).
+  // full: false = delta: the small collections are still read completely, but the
+  //   big one (attendance 'dates') is asked only for sessions updated since the last
+  //   sync (field kUpdatedField). If that query is refused (the Firestore index is
+  //   missing) or fails, it falls back to a full sync and remembers it.
+  static const String _kDeltaWm = 'sqlite_delta_wm_ms';
+  static const String _kLastFull = 'sqlite_last_full_ms';
+  static const String kDeltaBroken = 'sqlite_delta_broken';
+
+  static Future<bool> replaceAllFromFirestore({bool full = true}) async {
     if (_syncing) return false;
     if (!await _isOnline()) return false;
     _syncing = true;
     try {
       const t = Duration(seconds: 30);
       final fs = FirebaseFirestore.instance;
+      final prefs = await SharedPreferences.getInstance();
+      // A full sync (daily / forced) tries delta again, so one bad day never turns
+      // it off for good. Between full syncs, a delta marked broken stays off.
+      if (full && prefs.getBool(kDeltaBroken) == true) {
+        await prefs.setBool(kDeltaBroken, false);
+      }
+      var delta = !full && prefs.getBool(kDeltaBroken) != true;
+      final oldWm = prefs.getInt(_kDeltaWm) ?? 0;
 
       final depts = await fs.collection('departments').get().timeout(t);
       final semDocs = await fs.collectionGroup('semesters').get().timeout(t);
       final students = await fs.collectionGroup('students').get().timeout(t);
       final subjects = await fs.collectionGroup('subjects').get().timeout(t);
       final overrides = await fs.collectionGroup('overrides').get().timeout(t);
-      final dates = await fs.collectionGroup('dates').get().timeout(t);
+      late QuerySnapshot<Map<String, dynamic>> dates;
+      if (delta) {
+        try {
+          // 2 minutes back, so nothing near the previous watermark is missed.
+          final since = Timestamp.fromMillisecondsSinceEpoch(
+              oldWm > 120000 ? oldWm - 120000 : 0);
+          dates = await fs
+              .collectionGroup('dates')
+              .where(kUpdatedField, isGreaterThanOrEqualTo: since)
+              .get()
+              .timeout(t);
+          await prefs.setBool(kDeltaBroken, false);
+        } catch (e) {
+          debugPrint('Delta sync not possible, doing a full sync: $e');
+          // Only a missing Firestore index (failed-precondition) or a refused query
+          // means delta can not work. A slow network (timeout) must not switch it off.
+          if (e is FirebaseException &&
+              (e.code == 'failed-precondition' ||
+                  e.code == 'permission-denied')) {
+            await prefs.setBool(kDeltaBroken, true);
+          }
+          delta = false;
+          dates = await fs.collectionGroup('dates').get().timeout(t);
+        }
+      } else {
+        dates = await fs.collectionGroup('dates').get().timeout(t);
+      }
       final teachers = await fs.collection('teachers').get().timeout(t);
       final claims = await fs.collectionGroup('claims').get().timeout(t);
 
@@ -855,6 +1027,7 @@ class LocalDb {
       final subjectRows = <Map<String, Object?>>[];
       final overrideRows = <Map<String, Object?>>[];
       final attendanceRows = <Map<String, Object?>>[];
+      final sessionRows = <Map<String, Object?>>[];
       final teacherRows = <Map<String, Object?>>[];
       final claimRows = <Map<String, Object?>>[];
 
@@ -936,6 +1109,9 @@ class LocalDb {
         });
       }
 
+      // Sessions whose old rows must be replaced (delta mode only).
+      final changedSessions = <List<String>>[];
+      var newWm = delta ? oldWm : 0;
       for (final d in dates.docs) {
         final seg = d.reference.path.split('/');
         if (!(seg.length == 10 &&
@@ -946,7 +1122,27 @@ class LocalDb {
             seg[8] == 'dates')) {
           continue;
         }
+        final up = d.data()[kUpdatedField];
+        if (up is Timestamp && up.millisecondsSinceEpoch > newWm) {
+          newWm = up.millisecondsSinceEpoch;
+        }
+        if (delta) {
+          changedSessions.add([seg[1], seg[3], seg[5], seg[7], d.id]);
+        }
         final parsed = parseAttendance(d.data());
+        if (parsed.status.isEmpty) continue;
+        sessionRows.add({
+          'dept_id': seg[1],
+          'section': seg[3],
+          'semester': seg[5],
+          'subject': seg[7],
+          'session_id': d.id,
+          'marked_time': parsed.meta['_time'] ?? '',
+          'marked_by': parsed.meta['_marked_by'] ?? '',
+          'marked_by_name': parsed.meta['_marked_by_name'] ?? '',
+          'session_type': parsed.meta['_type'] ?? kTypeClass,
+          'exam_phase': parsed.meta['_phase'] ?? kPhaseMid,
+        });
         parsed.status.forEach((roll, status) {
           attendanceRows.add({
             'dept_id': seg[1],
@@ -956,11 +1152,6 @@ class LocalDb {
             'session_id': d.id,
             'roll': roll,
             'status': status,
-            'marked_time': parsed.meta['_time'] ?? '',
-            'marked_by': parsed.meta['_marked_by'] ?? '',
-            'marked_by_name': parsed.meta['_marked_by_name'] ?? '',
-            'session_type': parsed.meta['_type'] ?? kTypeClass,
-            'exam_phase': parsed.meta['_phase'] ?? kPhaseMid,
           });
         });
       }
@@ -992,7 +1183,19 @@ class LocalDb {
       final db = await _open();
       await db.transaction((txn) async {
         for (final table in _tables) {
+          // Delta: keep the attendance rows, only changed sessions are replaced.
+          if (delta && (table == 'attendance' || table == 'sessions')) continue;
           await txn.delete(table);
+        }
+        if (delta) {
+          for (final k in changedSessions) {
+            for (final table in const ['attendance', 'sessions']) {
+              await txn.delete(table,
+                  where:
+                      'dept_id = ? AND section = ? AND semester = ? AND subject = ? AND session_id = ?',
+                  whereArgs: k);
+            }
+          }
         }
         final batch = txn.batch();
         void addAll(String table, List<Map<String, Object?>> rows) {
@@ -1006,11 +1209,25 @@ class LocalDb {
         addAll('students', studentRows);
         addAll('subjects', subjectRows);
         addAll('overrides', overrideRows);
+        addAll('sessions', sessionRows);
         addAll('attendance', attendanceRows);
         addAll('teachers', teacherRows);
         addAll('claims', claimRows);
         await batch.commit(noResult: true);
+        if (delta) {
+          // Subjects / departments deleted elsewhere: drop their attendance too.
+          for (final table in const ['attendance', 'sessions']) {
+            await txn.execute(
+                'DELETE FROM $table WHERE NOT EXISTS (SELECT 1 FROM subjects s '
+                'WHERE s.dept_id = $table.dept_id AND s.section = $table.section '
+                'AND s.semester = $table.semester AND s.name = $table.subject)');
+          }
+        }
       });
+      await prefs.setInt(_kDeltaWm, newWm);
+      if (!delta) {
+        await prefs.setInt(_kLastFull, DateTime.now().millisecondsSinceEpoch);
+      }
       return true;
     } catch (e) {
       debugPrint('LocalDb sync error: $e');
@@ -1084,24 +1301,30 @@ class LocalDb {
       {String? monthPrefix}) async {
     try {
       final db = await _open();
-      final rows = await db.query(
-        'attendance',
-        where:
-            '$_semWhere AND subject = ?${monthPrefix == null ? '' : ' AND session_id LIKE ?'}',
-        whereArgs: [
-          ..._semArgs(s),
-          subject,
-          if (monthPrefix != null) '$monthPrefix-%',
-        ],
+      final monthClause =
+          monthPrefix == null ? '' : ' AND session_id LIKE ?';
+      final args = [
+        ..._semArgs(s),
+        subject,
+        if (monthPrefix != null) '$monthPrefix-%',
+      ];
+      final sessionRows = await db.query(
+        'sessions',
+        where: '$_semWhere AND subject = ?$monthClause',
+        whereArgs: args,
         orderBy: 'session_id',
       );
+      final attRows = await db.query(
+        'attendance',
+        columns: ['session_id', 'roll', 'status'],
+        where: '$_semWhere AND subject = ?$monthClause',
+        whereArgs: args,
+      );
       final byId = <String, DateRecord>{};
-      for (final r in rows) {
+      for (final r in sessionRows) {
         final id = (r['session_id'] ?? '').toString();
-        final rec = byId.putIfAbsent(
-            id, () => DateRecord(id, <String, String>{}, <String, String>{}));
-        rec.status[(r['roll'] ?? '').toString()] =
-            (r['status'] ?? '').toString();
+        final rec =
+            DateRecord(id, <String, String>{}, <String, String>{});
         final t = (r['marked_time'] ?? '').toString();
         if (t.isNotEmpty) rec.meta['_time'] = t;
         final by = (r['marked_by'] ?? '').toString();
@@ -1112,6 +1335,13 @@ class LocalDb {
             (r['session_type'] ?? '').toString() == kTypeLab ? kTypeLab : kTypeClass;
         rec.meta['_phase'] =
             (r['exam_phase'] ?? '').toString() == kPhaseFinal ? kPhaseFinal : kPhaseMid;
+        byId[id] = rec;
+      }
+      for (final r in attRows) {
+        final rec = byId[(r['session_id'] ?? '').toString()];
+        if (rec == null) continue;
+        rec.status[(r['roll'] ?? '').toString()] =
+            (r['status'] ?? '').toString();
       }
       return byId.values.toList();
     } catch (e) {
@@ -1153,9 +1383,29 @@ class LocalDb {
         await txn.delete('attendance',
             where: '$_semWhere AND subject = ?',
             whereArgs: [..._semArgs(s), subject]);
+        await txn.delete('sessions',
+            where: '$_semWhere AND subject = ?',
+            whereArgs: [..._semArgs(s), subject]);
         final batch = txn.batch();
         for (final d in snap.docs) {
           final parsed = parseAttendance(d.data());
+          if (parsed.status.isEmpty) continue;
+          batch.insert(
+            'sessions',
+            {
+              'dept_id': s.deptId,
+              'section': s.section,
+              'semester': s.semester,
+              'subject': subject,
+              'session_id': d.id,
+              'marked_time': parsed.meta['_time'] ?? '',
+              'marked_by': parsed.meta['_marked_by'] ?? '',
+              'marked_by_name': parsed.meta['_marked_by_name'] ?? '',
+              'session_type': parsed.meta['_type'] ?? kTypeClass,
+              'exam_phase': parsed.meta['_phase'] ?? kPhaseMid,
+            },
+            conflictAlgorithm: sql.ConflictAlgorithm.replace,
+          );
           parsed.status.forEach((roll, st) {
             batch.insert(
               'attendance',
@@ -1167,11 +1417,6 @@ class LocalDb {
                 'session_id': d.id,
                 'roll': roll,
                 'status': st,
-                'marked_time': parsed.meta['_time'] ?? '',
-                'marked_by': parsed.meta['_marked_by'] ?? '',
-                'marked_by_name': parsed.meta['_marked_by_name'] ?? '',
-                'session_type': parsed.meta['_type'] ?? kTypeClass,
-                'exam_phase': parsed.meta['_phase'] ?? kPhaseMid,
               },
               conflictAlgorithm: sql.ConflictAlgorithm.replace,
             );
@@ -1266,6 +1511,7 @@ class LocalDb {
   static Future<void> deleteAllAttendance() {
     return _run((db) async {
       await db.delete('attendance');
+      await db.delete('sessions');
     });
   }
 
@@ -1276,6 +1522,7 @@ class LocalDb {
         final w = '$_semWhere AND subject = ?';
         final a = [..._semArgs(s), oldName];
         await txn.update('attendance', {'subject': newName}, where: w, whereArgs: a);
+        await txn.update('sessions', {'subject': newName}, where: w, whereArgs: a);
         await txn.update('overrides', {'subject': newName}, where: w, whereArgs: a);
         await txn.update('claims', {'subject': newName}, where: w, whereArgs: a);
         await txn.update('subjects', {'name': newName},
@@ -1315,14 +1562,37 @@ class LocalDb {
   }
 }
 
-// Refreshes SQLite from Firestore every few hours and right after coming back online.
+// How old the SQLite copy may get before it is refreshed from Firestore.
+// - Delta sync works (normal case): refresh every 2 hours. It only downloads the
+//   attendance sessions that changed, so it is cheap.
+// - Delta sync not available (Firestore index missing): every 6 hours, full copy.
+// Every change made inside the app is written to SQLite at once, and structural
+// changes (rename, restore, migration) call this with force: true.
+const Duration kLocalDbDeltaAge = Duration(hours: 2);
+const Duration kLocalDbMaxAge = Duration(hours: 6);
+// A full rebuild at least once a day, because deletions made on other devices are
+// invisible to a delta sync.
+const Duration kLocalDbFullEvery = Duration(hours: 24);
+
+Future<bool> _localDbIsFresh(SharedPreferences prefs) async {
+  final last = prefs.getInt('sqlite_last_sync_ms') ?? 0;
+  final age = DateTime.now().millisecondsSinceEpoch - last;
+  final broken = prefs.getBool(LocalDb.kDeltaBroken) == true;
+  return age < (broken ? kLocalDbMaxAge : kLocalDbDeltaAge).inMilliseconds;
+}
+
+// Refreshes SQLite from Firestore when it is out of date and right after coming
+// back online. Normally a delta sync; a full rebuild when forced, when the last
+// full rebuild is older than a day, or on the very first run.
 Future<void> syncLocalDbIfStale({bool force = false}) async {
   try {
     final prefs = await SharedPreferences.getInstance();
-    final last = prefs.getInt('sqlite_last_sync_ms') ?? 0;
-    final age = DateTime.now().millisecondsSinceEpoch - last;
-    if (!force && age < const Duration(hours: 1).inMilliseconds) return;
-    final ok = await LocalDb.replaceAllFromFirestore();
+    if (!force && await _localDbIsFresh(prefs)) return;
+    final lastFull = prefs.getInt('sqlite_last_full_ms') ?? 0;
+    final fullDue = force ||
+        DateTime.now().millisecondsSinceEpoch - lastFull >
+            kLocalDbFullEvery.inMilliseconds;
+    final ok = await LocalDb.replaceAllFromFirestore(full: fullDue);
     if (ok) {
       await prefs.setInt(
           'sqlite_last_sync_ms', DateTime.now().millisecondsSinceEpoch);
@@ -1330,20 +1600,16 @@ Future<void> syncLocalDbIfStale({bool force = false}) async {
   } catch (_) {}
 }
 
-// Login-time prefetch: one query each for students, subjects, semesters and
-// attendance, so lists and attendance also show offline.
+// Login-time prefetch. The big collections (students, subjects, semesters,
+// overrides, attendance) are already read once by syncLocalDbIfStale, and that
+// read also fills Firestore's offline cache, so they are NOT read a second time
+// here. Only the small documents are fetched, and the big sync runs only when due.
 Future<void> prefetchAllData() async {
   try {
     if ((await _netState()) != _Net.reachable) return;
-    final fs = FirebaseFirestore.instance;
     const t = Duration(seconds: 20);
     final futures = <Future>[
-      fs.collection('departments').get().timeout(t),
-      fs.collectionGroup('semesters').get().timeout(t),
-      fs.collectionGroup('students').get().timeout(t),
-      fs.collectionGroup('subjects').get().timeout(t),
-      fs.collectionGroup('overrides').get().timeout(t),
-      fs.collectionGroup('dates').get().timeout(t),
+      syncLocalDbIfStale(),
       permissionsRef().get().timeout(t),
       if (!AppSession.isAdmin && AppSession.teacherId.isNotEmpty)
         teacherClaimsRef(AppSession.teacherId).get().timeout(t),

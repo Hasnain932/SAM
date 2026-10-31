@@ -494,7 +494,9 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
                                             children: [
                                               Flexible(
                                                 child: Text(
-                                                  'Exam phase: ${phaseLabel(announced)}',
+                                                  announced == null
+                                                      ? 'Exam phase: not announced'
+                                                      : 'Exam phase: ${phaseLabel(announced)}',
                                                   style: const TextStyle(
                                                     color: Color(0xFFEAF6FF),
                                                     fontSize: 15,
@@ -509,8 +511,10 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
                                           const SizedBox(height: 4),
                                           Text(
                                             announced == kPhaseFinal
-                                                ? 'Teachers whose subject is still in Mid see a reminder to switch it to Final.'
-                                                : 'Tap Final to remind every teacher to switch their subject from Mid to Final.',
+                                                ? 'Teachers whose subject is still in Mid see a reminder and cannot take attendance until they switch it to Final.'
+                                                : announced == kPhaseMid
+                                                    ? 'Teachers whose subject is still in Final see a reminder and cannot take attendance until they switch it to Mid.'
+                                                    : 'Tap Mid or Final to remind every teacher to switch their subject to that phase.',
                                             style: const TextStyle(
                                                 color: kMuted, fontSize: 12.5),
                                           ),

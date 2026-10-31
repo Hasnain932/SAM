@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:sqflite/sqflite.dart' as sql;
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' show Random, cos, sin;
