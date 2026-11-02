@@ -27,7 +27,9 @@ class AppSession {
         student = m.map((k, v) => MapEntry(k.toString(), v.toString()));
       }
       if (kind == 'student' && student.isEmpty) kind = '';
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('auth_screens.dart:30: $e');
+    }
   }
 
   static Future<void> _save() async {
@@ -47,6 +49,28 @@ class AppSession {
     await _waitAnon();
     tick.value++;
     unawaited(_anon());
+  }
+
+  // Asks the server again whether this teacher is still approved. If the
+  // account was rejected or deleted, the saved session is ended. Offline or
+  // on any error nothing happens, so teachers can still work without internet.
+  static Future<void> recheckTeacher() async {
+    if (kind != 'teacher' || teacherId.isEmpty) return;
+    try {
+      if (!await _isOnline()) return;
+      if (!await ensureSignedIn()) return;
+      final snap = await FirebaseFirestore.instance
+          .collection('teachers')
+          .doc(teacherId)
+          .get(const GetOptions(source: Source.server))
+          .timeout(const Duration(seconds: 8));
+      if (!snap.exists || teacherStatusOf(snap.data() ?? {}) != 'approved') {
+        debugPrint('teacher $teacherId is no longer approved: logging out');
+        await logout();
+      }
+    } catch (e) {
+      debugPrint('recheckTeacher failed: $e');
+    }
   }
 
   static Future<void> loginHiddenAdmin() async {
@@ -69,7 +93,9 @@ class AppSession {
       final r = await Connectivity().checkConnectivity();
       if (r.every((x) => x == ConnectivityResult.none)) return;
       await _anon().timeout(const Duration(seconds: 4));
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('auth_screens.dart:72: $e');
+    }
   }
 
   // Clear the old session when logging in as a Firebase admin.
@@ -80,7 +106,9 @@ class AppSession {
     teacherName = '';
     try {
       await _save();
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('auth_screens.dart:83: $e');
+    }
   }
 
   // Best effort: anonymous sign-in lets teachers and the second admin pass
@@ -92,7 +120,9 @@ class AppSession {
             .signInAnonymously()
             .timeout(const Duration(seconds: 6));
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('auth_screens.dart:95: $e');
+    }
   }
 
   // Last sign-in failure code (for a clear message instead of a vague one).
@@ -152,10 +182,14 @@ class AppSession {
     isAdmin = false;
     try {
       await _save();
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('auth_screens.dart:155: $e');
+    }
     try {
       await FirebaseAuth.instance.signOut();
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('auth_screens.dart:158: $e');
+    }
     tick.value++;
   }
 }
@@ -806,6 +840,9 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
   String? _errorMessage;
   bool _obscure = true;
 
+  static int _hiddenFails = 0;
+  static DateTime? _hiddenLockUntil;
+
   static const String _noInternetMsg =
       "Internet connection is required to log in. Please check your connection and try again.";
 
@@ -839,11 +876,26 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
         if (mounted) Navigator.of(context).popUntil((r) => r.isFirst);
       } else {
         // ---- Second admin: username/password from departments ----
+        // Slows down guessing: 5 wrong tries lock this login for 5 minutes.
+        final lock = _hiddenLockUntil;
+        if (lock != null && DateTime.now().isBefore(lock)) {
+          final mins = lock.difference(DateTime.now()).inMinutes + 1;
+          setState(() =>
+              _errorMessage = "Too many attempts. Try again in $mins min.");
+          return;
+        }
         final ok = await _checkHiddenAdmin(id, password);
         if (ok) {
+          _hiddenFails = 0;
+          _hiddenLockUntil = null;
           await AppSession.loginHiddenAdmin();
           if (mounted) Navigator.of(context).popUntil((r) => r.isFirst);
         } else {
+          _hiddenFails++;
+          if (_hiddenFails >= 5) {
+            _hiddenFails = 0;
+            _hiddenLockUntil = DateTime.now().add(const Duration(minutes: 5));
+          }
           setState(() => _errorMessage = "Incorrect email or password");
         }
       }
@@ -926,7 +978,8 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
 }
 
 // Teacher login / sign up
-// Stored at teachers/{username}: name, username, password, status.
+// Stored at teachers/{username}: name, username, pw_salt, pw_hash, status.
+// The password itself is never stored, only a salted hash.
 // New sign-ups start as 'pending' and need admin approval.
 class TeacherAuthScreen extends StatefulWidget {
   const TeacherAuthScreen({super.key});
@@ -990,12 +1043,27 @@ class _TeacherAuthScreenState extends State<TeacherAuthScreen> {
           return;
         }
         final data = snap.data() ?? {};
-        if ((data['password'] ?? '').toString() != password) {
+        // New accounts store only a salted hash (pw_salt + pw_hash). Old accounts
+        // still have a plain 'password' field: it is accepted once, then replaced
+        // by a hash right after a successful login.
+        final storedHash = (data['pw_hash'] ?? '').toString();
+        final legacyPlain = (data['password'] ?? '').toString();
+        bool passOk;
+        bool needUpgrade = false;
+        if (storedHash.isNotEmpty) {
+          passOk = _teacherPwHash(
+                  id, (data['pw_salt'] ?? '').toString(), password) ==
+              storedHash;
+        } else {
+          passOk = legacyPlain.isNotEmpty && legacyPlain == password;
+          needUpgrade = passOk;
+        }
+        if (!passOk) {
           setState(() => _error = 'Incorrect username or password');
           return;
         }
-        // Approval is checked only at login. After approval, the saved local session
-        // is used and the server is never asked again. Accounts with no status
+        // Approval is checked at login and again later by AppSession.recheckTeacher
+        // (on app start, on reconnect, every 30 min). Accounts with no status
         // (created before this feature) count as approved.
         final status = teacherStatusOf(data);
         if (status == 'pending') {
@@ -1008,6 +1076,9 @@ class _TeacherAuthScreenState extends State<TeacherAuthScreen> {
               _error = 'Your account request was rejected by the admin.');
           return;
         }
+        if (needUpgrade) {
+          unawaited(_upgradeTeacherPassword(ref, id, password));
+        }
         final tName = (data['name'] ?? username).toString();
         unawaited(LocalDb.upsertTeacher(id, tName, username));
         await AppSession.loginTeacher(id, tName);
@@ -1016,10 +1087,12 @@ class _TeacherAuthScreenState extends State<TeacherAuthScreen> {
           setState(() => _error = 'This username is already taken');
           return;
         }
+        final salt = _newSalt();
         final newDoc = {
           'name': name,
           'username': username,
-          'password': password,
+          'pw_salt': salt,
+          'pw_hash': _teacherPwHash(id, salt, password),
           'status': 'pending',
         };
         if (await _isOnline()) {
@@ -1138,6 +1211,40 @@ class _TeacherAuthScreenState extends State<TeacherAuthScreen> {
 String teacherStatusOf(Map<String, dynamic> data) {
   final s = (data['status'] ?? 'approved').toString();
   return (s == 'pending' || s == 'denied') ? s : 'approved';
+}
+
+// ---- Teacher password hashing ----
+// Random per-account salt, then repeated SHA-256 so that guessing is slower.
+String _newSalt() {
+  final r = Random.secure();
+  return List.generate(16, (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0'))
+      .join();
+}
+
+String _teacherPwHash(String id, String salt, String password) {
+  var h = _sha256Hex('sam-teacher|$id|$salt|$password');
+  for (var i = 0; i < 2000; i++) {
+    h = _sha256Hex('$h|$salt');
+  }
+  return h;
+}
+
+// Replaces an old plain-text password field with a salted hash (best effort).
+Future<void> _upgradeTeacherPassword(
+    DocumentReference<Map<String, dynamic>> ref,
+    String id,
+    String password) async {
+  try {
+    if (!await AppSession.ensureSignedIn()) return;
+    final salt = _newSalt();
+    await ref.update({
+      'pw_salt': salt,
+      'pw_hash': _teacherPwHash(id, salt, password),
+      'password': FieldValue.delete(),
+    }).timeout(const Duration(seconds: 8));
+  } catch (e) {
+    debugPrint('teacher password upgrade failed: $e');
+  }
 }
 
 // Admin icon in the Departments app bar, with a badge for pending requests.

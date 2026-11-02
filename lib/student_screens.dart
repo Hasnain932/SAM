@@ -120,7 +120,7 @@ Future<List<StudentCred>> generateStudentLogins(SemRef sem,
   final students = await loadSemesterStudents(sem);
   final existing = await loadStudentLoginNames(sem);
   final targets = students.where((st) {
-    final roll = st['roll']!;
+    final roll = (st['roll'] ?? '');
     return onlyRolls == null
         ? !existing.containsKey(roll)
         : onlyRolls.contains(roll);
@@ -130,7 +130,7 @@ Future<List<StudentCred>> generateStudentLogins(SemRef sem,
   var batch = FirebaseFirestore.instance.batch();
   var pending = 0;
   for (final st in targets) {
-    final roll = st['roll']!;
+    final roll = (st['roll'] ?? '');
     final name = st['name'] ?? '';
     final username = existing[roll] ?? await _pickStudentUsername(sem, roll);
     final password = _randomFrom(_kStudentPwChars, 8);
@@ -217,7 +217,7 @@ Future<int> adoptStudentLogins(SemRef sem, {Set<String>? alreadyMoved}) async {
   var pending = 0;
   var moved = 0;
   for (final st in students) {
-    final key = st['roll']!;
+    final key = (st['roll'] ?? '');
     if (mine.containsKey(key)) continue;
     final name = norm(st['name'] ?? '');
     for (final d in cands) {
@@ -676,13 +676,17 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
       p = await SharedPreferences.getInstance();
       final age = DateTime.now().millisecondsSinceEpoch - (p.getInt(key) ?? 0);
       if (!force && age >= 0 && age < 24 * 3600 * 1000) return true;
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('student_screens.dart:679: $e');
+    }
     _syncedOk = false;
     final ok = await _syncLogin();
     if (ok && _syncedOk) {
       try {
         await p?.setInt(key, DateTime.now().millisecondsSinceEpoch);
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('student_screens.dart:685: $e');
+      }
     }
     return ok;
   }
@@ -747,7 +751,9 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
                 }
             ],
           }));
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('student_screens.dart:750: $e');
+    }
   }
 
   _SubjAtt _fromSummary(String name, Map s) {
@@ -802,7 +808,9 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
         final sd = await safeGetDocOrNull(summaryRef(sem, roll));
         final m = sd?.data()?['subjects'];
         if (m is Map) sums = Map<String, dynamic>.from(m);
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('student_screens.dart:805: $e');
+      }
 
       final list = <_SubjAtt>[];
       final futures = names.map((n) async {
@@ -812,7 +820,9 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
         try {
           final ov = await loadOverrides(sem, n);
           if (ov[roll]?['kind'] == 'hidden') return null; // not in this subject
-        } catch (_) {}
+        } catch (e) {
+          debugPrint('student_screens.dart:815: $e');
+        }
         return _loadSubject(sem, n, roll);
       }).toList();
       for (final r in await Future.wait(futures)) {

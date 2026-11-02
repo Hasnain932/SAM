@@ -389,7 +389,9 @@ Future<List<ImportedStudent>?> pickStudentsFromFile(BuildContext context) async 
   Uint8List? bytes;
   try {
     bytes = await f.readAsBytes();
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('students_manage.dart:392: $e');
+  }
   if (bytes == null) {
     if (!context.mounted) return null;
     _importSnack(context, 'Could not read the selected file.');
@@ -567,7 +569,7 @@ StudentImportPlan planStudentImport(
       continue;
     }
     final s = existing[e];
-    final key = s['roll']!;
+    final key = (s['roll'] ?? '');
     final oldF = fatherOf(e).trim();
     final newF = imported[i].father.trim();
     if (isFuzzy.contains(i)) {
@@ -613,7 +615,7 @@ Future<StudentImportDecision?> confirmStudentImportPlan(
   String where,
   List<Map<String, String>> existing,
 ) {
-  final existingRolls = {for (final s in existing) rollOf(s['roll']!)};
+  final existingRolls = {for (final s in existing) rollOf(s['roll'] ?? '')};
   var maxRoll = 0;
   for (final r in existingRolls) {
     final n = int.tryParse(r) ?? 0;
@@ -920,7 +922,7 @@ class _ManageStudentsScreenState extends State<ManageStudentsScreen> {
               String key = existingRoll ?? roll;
               if (!isEditing) {
                 final existing = await loadSemesterStudents(sem);
-                key = uniqueStudentKey(roll, existing.map((s) => s['roll']!));
+                key = uniqueStudentKey(roll, existing.map((s) => (s['roll'] ?? '')));
               }
               // The write is created first, so the list updates at once from the
               // local cache; SQLite is updated immediately too.
@@ -1037,8 +1039,8 @@ class _ManageStudentsScreenState extends State<ManageStudentsScreen> {
         context, plan, '$semLabel ${sem.section}', existing);
     if (decision == null) return;
 
-    final byKey = {for (final s in existing) s['roll']!: s};
-    final taken = existing.map((s) => s['roll']!).toSet();
+    final byKey = {for (final s in existing) (s['roll'] ?? ''): s};
+    final taken = existing.map((s) => (s['roll'] ?? '')).toSet();
     var batch = FirebaseFirestore.instance.batch();
     var ops = 0;
     final commits = <Future<void>>[];
@@ -1377,8 +1379,8 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
       final ovF = loadOverrides(widget.sem, widget.subjectName);
       final master = await masterF;
       _overrides = await ovF;
-      _master = {for (final s in master) s['roll']!: s['name']!};
-      _masterFather = {for (final s in master) s['roll']!: s['father'] ?? ''};
+      _master = {for (final s in master) (s['roll'] ?? ''): (s['name'] ?? '')};
+      _masterFather = {for (final s in master) (s['roll'] ?? ''): s['father'] ?? ''};
     } catch (e) {
       debugPrint('Subject students load error: $e');
     }
@@ -1700,11 +1702,11 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
                               padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
                               child: Row(
                                 children: [
-                                  RollBadge(roll: s['roll']!),
+                                  RollBadge(roll: (s['roll'] ?? '')),
                                   const SizedBox(width: 12),
                                   Expanded(
                                     child: StudentNameBlock(
-                                        name: s['name']!,
+                                        name: (s['name'] ?? ''),
                                         father: s['father'] ?? ''),
                                   ),
                                   IconButton(
@@ -1712,7 +1714,7 @@ class _SubjectStudentsScreenState extends State<SubjectStudentsScreen> {
                                         color: kAbsent),
                                     tooltip: 'Remove from this subject',
                                     onPressed: () =>
-                                        _removeStudent(s['roll']!, s['name']!),
+                                        _removeStudent(s['roll'] ?? '', (s['name'] ?? '')),
                                   ),
                                 ],
                               ),

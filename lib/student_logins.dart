@@ -52,7 +52,7 @@ Future<Uint8List> buildStudentCardsPdf({
       child: pw.Column(
         crossAxisAlignment: pw.CrossAxisAlignment.start,
         children: [
-          pw.Text('University of Swabi',
+          pw.Text(kInstitutionName,
               style: pw.TextStyle(
                   fontSize: 12, fontWeight: pw.FontWeight.bold, color: navy)),
           pw.Text('SAM - Smart Attendance',
@@ -163,7 +163,7 @@ Future<Uint8List> buildStudentListPdf({
     pageFormat: pdf_lib.PdfPageFormat.a4,
     margin: const pw.EdgeInsets.all(28),
     build: (ctx) => [
-      pw.Text('University of Swabi',
+      pw.Text(kInstitutionName,
           style: pw.TextStyle(
               fontSize: 16, fontWeight: pw.FontWeight.bold, color: navy)),
       pw.SizedBox(height: 2),
@@ -415,7 +415,7 @@ class _StudentLoginsScreenState extends State<StudentLoginsScreen> {
     );
     if (ok != true || !mounted) return;
     await _create(
-        only: {for (final st in _students) st['roll']!}, replaceAll: true);
+        only: {for (final st in _students) (st['roll'] ?? '')}, replaceAll: true);
   }
 
   // One menu behind the existing header icon: sync, reset all, export PDF.
@@ -461,7 +461,7 @@ class _StudentLoginsScreenState extends State<StudentLoginsScreen> {
       if (!mounted) return;
       final creds = <StudentCred>[];
       for (final st in _students) {
-        final roll = st['roll']!;
+        final roll = (st['roll'] ?? '');
         final username = _logins[roll];
         final pw = username == null ? null : saved[username];
         if (username != null && pw != null) {
@@ -555,7 +555,7 @@ class _StudentLoginsScreenState extends State<StudentLoginsScreen> {
               padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
               child: Row(
                 children: [
-                  RollBadge(roll: st['roll']!),
+                  RollBadge(roll: (st['roll'] ?? '')),
                   const SizedBox(width: 12),
                   Expanded(
                     child: StudentNameBlock(
@@ -572,7 +572,7 @@ class _StudentLoginsScreenState extends State<StudentLoginsScreen> {
                         : 'Create login',
                     onPressed: _busy
                         ? null
-                        : () => _confirmReset(st['roll']!, st['name'] ?? '',
+                        : () => _confirmReset(st['roll'] ?? '', st['name'] ?? '',
                             _logins.containsKey(st['roll'])),
                   ),
                 ],

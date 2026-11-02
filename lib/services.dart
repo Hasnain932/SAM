@@ -210,7 +210,9 @@ Future<_Net> _netState() async {
   try {
     final r = await Connectivity().checkConnectivity();
     linked = !r.contains(ConnectivityResult.none);
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('services.dart:213: $e');
+  }
   if (!linked) {
     _netCache = _Net.none;
     _netCacheAt = DateTime.now();
@@ -263,7 +265,9 @@ Future<DocumentSnapshot<Map<String, dynamic>>> safeGetDoc(
     server.ignore();
     try {
       return await server.timeout(_kReadTimeout);
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('services.dart:266: $e');
+    }
     try {
       return await ref.get(cacheOnly);
     } catch (_) {
@@ -301,7 +305,9 @@ Future<QuerySnapshot<Map<String, dynamic>>> safeGetQuery(
     server.ignore();
     try {
       return await server.timeout(_kReadTimeout);
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('services.dart:304: $e');
+    }
     final cached = await query.get(cacheOnly);
     if (cached.docs.isNotEmpty) return cached;
     // Nothing cached: wait a bit longer for the server instead of showing an empty list.
@@ -432,7 +438,9 @@ Stream<QuerySnapshot<Map<String, dynamic>>> liveQuery(
           // Empty cache: give the live stream a moment, then show the empty result.
           await Future.delayed(const Duration(milliseconds: 1500));
           if (!gotLive && !cancelled) ctrl.add(cached);
-        } catch (_) {}
+        } catch (e) {
+          debugPrint('services.dart:435: $e');
+        }
       }());
     },
     onCancel: () async {
@@ -529,7 +537,7 @@ List<Map<String, String>> _sortedStudents(Map<String, String> m,
             'father': fathers?[e.key] ?? '',
           })
       .toList();
-  list.sort((a, b) => compareStudentKeys(a['roll']!, b['roll']!));
+  list.sort((a, b) => compareStudentKeys(a['roll'] ?? '', (b['roll'] ?? '')));
   return list;
 }
 
@@ -558,13 +566,13 @@ Future<({int copied, int logins})> copyStudentsToSemester(
   final src = await loadSemesterStudents(from);
   if (src.isEmpty) return (copied: 0, logins: 0);
   final dest = await loadSemesterStudents(to);
-  final taken = dest.map((s) => s['roll']!).toSet();
+  final taken = dest.map((s) => (s['roll'] ?? '')).toSet();
   final keyMap = <String, String>{};
   for (final s in src) {
-    final key = uniqueStudentKey(rollOf(s['roll']!), taken);
+    final key = uniqueStudentKey(rollOf(s['roll'] ?? ''), taken);
     taken.add(key);
-    keyMap[s['roll']!] = key;
-    final name = s['name']!;
+    keyMap[s['roll'] ?? ''] = key;
+    final name = (s['name'] ?? '');
     final father = s['father'] ?? '';
     unawaited(to.students
         .doc(key)
@@ -630,8 +638,8 @@ Future<List<Map<String, String>>> loadSubjectStudents(
   final ovF = loadOverrides(sem, subject);
   final master = await masterF;
   final ov = await ovF;
-  final m = {for (final s in master) s['roll']!: s['name']!};
-  final f = {for (final s in master) s['roll']!: s['father'] ?? ''};
+  final m = {for (final s in master) (s['roll'] ?? ''): (s['name'] ?? '')};
+  final f = {for (final s in master) (s['roll'] ?? ''): s['father'] ?? ''};
   ov.forEach((roll, o) {
     if (o['kind'] == 'hidden') {
       m.remove(roll);
@@ -685,7 +693,9 @@ Future<void> cacheSubjectPhase(SemRef s, String subject, String phase) async {
   try {
     final p = await SharedPreferences.getInstance();
     await p.setString(_phasePrefKey(s, subject), phase);
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('services.dart:688: $e');
+  }
 }
 
 // Server value of the subject phase (null if offline / not set).
@@ -695,7 +705,9 @@ Future<String?> fetchServerSubjectPhase(SemRef s, String subject) async {
         await s.subjectDoc(subject).get().timeout(const Duration(seconds: 4));
     final v = d.data()?['exam_phase'];
     if (v == kPhaseFinal || v == kPhaseMid) return v as String;
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('services.dart:698: $e');
+  }
   return null;
 }
 
@@ -742,7 +754,9 @@ Future<void> cacheAnnouncedPhase(String? phase) async {
     } else {
       await p.setString(_kAnnouncedPrefKey, phase);
     }
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('services.dart:745: $e');
+  }
 }
 
 Future<void> saveAnnouncedPhase(String phase) async {
@@ -1143,13 +1157,17 @@ Future<void> releaseAllClaimsOfTeacher(String teacherId) async {
         (c['subject'] ?? '').toString(),
       );
     }
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('services.dart:1146: $e');
+  }
   try {
     for (final c in await LocalDb.claimsOf(teacherId)) {
       add(c['dept'] ?? '', c['section'] ?? '', c['semester'] ?? '',
           c['subject'] ?? '');
     }
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('services.dart:1152: $e');
+  }
 
   for (final e in found.values) {
     final sem = SemRef(e['dept']!, e['section']!, e['semester']!);
@@ -1183,7 +1201,9 @@ Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>> _getDocsForDelete(
       final snap = await query.get().timeout(const Duration(seconds: 10));
       return snap.docs;
     }
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('services.dart:1186: $e');
+  }
   try {
     final snap = await query.get(const GetOptions(source: Source.cache));
     return snap.docs;
@@ -1223,7 +1243,9 @@ Future<void> deleteSubjectEverywhere(SemRef sem, String subject) async {
     summaryRolls = (await loadSubjectStudents(sem, subject))
         .map((x) => x['roll'] ?? '')
         .toList();
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('services.dart:1226: $e');
+  }
   final subSnap = await safeGetDocOrNull(sem.subjectDoc(subject));
   await _cleanupClaimOfSubject(sem, subject, subSnap?.data());
   _deleteDocs(await _getDocsForDelete(sem.dates(subject)));
@@ -1416,7 +1438,9 @@ Future<void> renameSubjectEverywhere(
     summaryRolls = (await loadSubjectStudents(sem, oldName))
         .map((x) => x['roll'] ?? '')
         .toList();
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('services.dart:1419: $e');
+  }
 
   final data = Map<String, dynamic>.from(oldSnap.data() ?? {});
   data['name'] = newName;

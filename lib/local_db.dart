@@ -271,7 +271,9 @@ Future<void> restoreFromBackupUi(BuildContext context) async {
   String when = created;
   try {
     when = DateFormat('d MMM yyyy, h:mm a').format(DateTime.parse(created));
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('local_db.dart:274: $e');
+  }
 
   final ok = await showDialog<bool>(
     context: context,
@@ -438,7 +440,9 @@ Future<void> ensureHiddenAdminDepartment() async {
     }
     await metaRef.set({'done': true}).timeout(const Duration(seconds: 10));
     await prefs.setBool('hidden_admin_v1', true);
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('local_db.dart:441: $e');
+  }
 }
 
 // Local SQLite database (used alongside Firestore, not instead of it)
@@ -1597,7 +1601,9 @@ Future<void> syncLocalDbIfStale({bool force = false}) async {
       await prefs.setInt(
           'sqlite_last_sync_ms', DateTime.now().millisecondsSinceEpoch);
     }
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('local_db.dart:1600: $e');
+  }
 }
 
 // Login-time prefetch. The big collections (students, subjects, semesters,
@@ -1615,5 +1621,7 @@ Future<void> prefetchAllData() async {
         teacherClaimsRef(AppSession.teacherId).get().timeout(t),
     ];
     await Future.wait(futures.map((f) => f.catchError((_) => null)));
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('local_db.dart:1618: $e');
+  }
 }

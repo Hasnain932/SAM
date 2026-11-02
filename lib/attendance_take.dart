@@ -224,7 +224,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       }
     }
 
-    attendanceStatus = {for (var s in students) s['roll']!: "P"};
+    attendanceStatus = {for (var s in students) (s['roll'] ?? ''): "P"};
   }
 
   void _computePercentages() {
@@ -241,7 +241,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
     }
     final Map<String, double> result = {};
     for (final s in students) {
-      final roll = s['roll']!;
+      final roll = (s['roll'] ?? '');
       result[roll] = total > 0 ? ((counts[roll] ?? 0) / total) * 100 : 100.0;
     }
     studentPercentage = result;
@@ -301,7 +301,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
     final docId = _getDocumentId();
 
     final data = <String, dynamic>{
-      for (final s in students) s['roll']!: attendanceStatus[s['roll']!] ?? 'P',
+      for (final s in students) (s['roll'] ?? ''): attendanceStatus[s['roll'] ?? ''] ?? 'P',
     };
 
     // Time: an admin (or a teacher allowed to change time, or master switch ON) picks it.
@@ -325,7 +325,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
     data['_phase'] = sessionPhase; // Mid or Final
 
     final status = <String, String>{
-      for (final s in students) s['roll']!: attendanceStatus[s['roll']!] ?? 'P',
+      for (final s in students) (s['roll'] ?? ''): attendanceStatus[s['roll'] ?? ''] ?? 'P',
     };
 
     // Not awaited: this never completes while offline.
@@ -396,7 +396,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
 
     setState(() {
       _records.removeWhere((r) => r.id == docId);
-      attendanceStatus = {for (var s in students) s['roll']!: "P"};
+      attendanceStatus = {for (var s in students) (s['roll'] ?? ''): "P"};
       existingRecord = false;
       existingMeta = {};
       timeStr = hhmm(TimeOfDay.now());
@@ -452,7 +452,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
       }
 
       final status = <String, String>{
-        for (final s in students) s['roll']!: fallback,
+        for (final s in students) (s['roll'] ?? ''): fallback,
       };
       plan.rowToStudent.forEach((rowIdx, key) {
         final st = sheet.rows[rowIdx].status[col.col];
@@ -526,7 +526,10 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
     );
   }
 
-  void _exportToExcel() async {
+  bool _exportingExcel = false;
+
+  Future<void> _exportToExcel() async {
+    if (_exportingExcel) return;
     final recs = await loadDateRecords(widget.sem, widget.subjectName);
     if (!mounted) return;
     final opt = await askExportOptions(context, recs);
@@ -537,35 +540,46 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
           color: kAbsent);
       return;
     }
-    final fileBytes = buildAttendanceExcelBytes(
-      info: await loadExcelInfo(widget.sem, widget.subjectName),
-      recs: picked,
-      students: students,
-      useLetters: opt.useLetters,
-    );
-    // File name: Subject_Section_A_Semester_3_[Mid_|Final_][Class_|Lab_]Full_Report.xlsx
-    final base = exportFileBase(widget.sem, widget.semLabel, widget.subjectName);
-    final fileName =
-        '${base}_${phaseFileTag(opt.phase)}${scopeFileTag(opt.scope)}Full_Report.xlsx';
-    if (!mounted) return;
-    if (kIsWeb) {
-      await webShareOrDownload(context, fileBytes!, fileName,
-          text:
-              '${widget.subjectName} • Section ${widget.sem.section} • ${widget.semLabel} Attendance Report');
-      return;
+    _exportingExcel = true;
+    try {
+      final fileBytes = buildAttendanceExcelBytes(
+        info: await loadExcelInfo(widget.sem, widget.subjectName),
+        recs: picked,
+        students: students,
+        useLetters: opt.useLetters,
+      );
+      if (fileBytes == null || fileBytes.isEmpty) {
+        throw Exception('Excel file could not be created');
+      }
+      // File name: Subject_Section_A_Semester_3_[Mid_|Final_][Class_|Lab_]Full_Report.xlsx
+      final base =
+          exportFileBase(widget.sem, widget.semLabel, widget.subjectName);
+      final fileName =
+          '${base}_${phaseFileTag(opt.phase)}${scopeFileTag(opt.scope)}Full_Report.xlsx';
+      if (!mounted) return;
+      final shareText =
+          '${widget.subjectName} • Section ${widget.sem.section} • ${widget.semLabel} Attendance Report';
+      if (kIsWeb) {
+        await webShareOrDownload(context, fileBytes, fileName, text: shareText);
+        return;
+      }
+      final directory = await getApplicationDocumentsDirectory();
+      final filePath = '${directory.path}/$fileName';
+      File(filePath)
+        ..createSync(recursive: true)
+        ..writeAsBytesSync(fileBytes);
+      await SharePlus.instance.share(ShareParams(
+        files: [XFile(filePath)],
+        text: shareText,
+      ));
+    } catch (e) {
+      debugPrint('Excel export error: $e');
+      if (mounted) {
+        showSnack(context, 'Could not create Excel file: $e', color: kAbsent);
+      }
+    } finally {
+      _exportingExcel = false;
     }
-    final directory = await getApplicationDocumentsDirectory();
-    String filePath = '${directory.path}/$fileName';
-
-    File(filePath)
-      ..createSync(recursive: true)
-      ..writeAsBytesSync(fileBytes!);
-
-    await SharePlus.instance.share(ShareParams(
-      files: [XFile(filePath)],
-      text:
-          '${widget.subjectName} • Section ${widget.sem.section} • ${widget.semLabel} Attendance Report',
-    ));
   }
 
   // Class / Lab Class button (same look as the Mark all buttons).
@@ -968,7 +982,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                   Builder(builder: (context) {
                     var absentCount = 0;
                     for (final st in students) {
-                      if ((attendanceStatus[st['roll']!] ?? 'P') == 'A') {
+                      if ((attendanceStatus[st['roll'] ?? ''] ?? 'P') == 'A') {
                         absentCount++;
                       }
                     }
@@ -1014,7 +1028,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                                   if (!_guardPhase()) return;
                                   setState(() {
                                     for (final st in students) {
-                                      attendanceStatus[st['roll']!] = 'P';
+                                      attendanceStatus[st['roll'] ?? ''] = 'P';
                                     }
                                   });
                                 }
@@ -1030,7 +1044,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                                   if (!_guardPhase()) return;
                                   setState(() {
                                     for (final st in students) {
-                                      attendanceStatus[st['roll']!] = 'A';
+                                      attendanceStatus[st['roll'] ?? ''] = 'A';
                                     }
                                   });
                                 }
@@ -1052,7 +1066,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                               );
                             }
                             var student = students[index - 1];
-                            String roll = student['roll']!;
+                            String roll = (student['roll'] ?? '');
                             double? pct = studentPercentage[roll];
                             bool isLow = pct != null && pct < 75;
 
@@ -1073,7 +1087,7 @@ class _SubjectAttendanceScreenState extends State<SubjectAttendanceScreen> {
                                           CrossAxisAlignment.start,
                                       children: [
                                         StudentNameBlock(
-                                          name: student['name']!,
+                                          name: (student['name'] ?? ''),
                                           father: student['father'] ?? '',
                                           color: isLow ? kAbsent : null,
                                           extra: pct == null

@@ -1,15 +1,21 @@
 part of 'main.dart';
 
 // ---- Shared Excel layout ----
-// Both exports use this layout: info section (Program, Semester, Instructor,
-// Course, Section, Marks), three header rows (Week, Date, Class No.), then students.
-// Attendance is 1 (present) / 0 (absent). Totals, Percentage and Marks are formulas.
+// Both exports use this layout:
+//   row 1      merged title banner (institution name)
+//   rows 2-4   info grid: Program | Course, Semester | Section, Marks | Instructor
+//   next rows  Week (merged over its sessions) / Date / Class No., with Roll No,
+//              Name, Totals merged over the three header rows, then the students.
+// Attendance is P / A or 1 / 0. Totals, Percentage and Marks are formulas.
+// The file is plain .xlsx (shared strings, valid element order, no overlapping
+// merges), so Excel 2010 and newer open it without any repair prompt.
 
 // Default attendance marks. Only the starting value of the "Marks" cell; the
 // formulas read that cell, so it can be changed per course in Excel.
 const double kDefaultAttendanceMarks = 5;
 
-// Info section details. Nothing is hardcoded; all values come from the export.
+// Info section details. All values come from the export; the institution name
+// in the title row comes from kInstitutionName (main.dart).
 class ExcelInfo {
   final String program;
   final String semester;
@@ -32,7 +38,9 @@ Future<ExcelInfo> loadExcelInfo(SemRef sem, String subject) async {
   try {
     final labels = await loadSemesterLabels(sem.deptId, sem.section);
     semLabel = labels[sem.semester] ?? semLabel;
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('excel_export.dart:35: $e');
+  }
 
   String instructor = '';
   try {
@@ -41,7 +49,9 @@ Future<ExcelInfo> loadExcelInfo(SemRef sem, String subject) async {
     if (res.docs.isNotEmpty) {
       instructor = (res.docs.first.data()['claimed_by_name'] ?? '').toString();
     }
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('excel_export.dart:44: $e');
+  }
   if (instructor.isEmpty && !AppSession.isAdmin) {
     instructor = AppSession.teacherName;
   }
@@ -81,6 +91,30 @@ String _ordinal(int n) {
   }
 }
 
+// Approximate width (in Excel column units) a text needs so it is fully
+// visible: lets every column grow to fit its longest text.
+double _textUnits(String s, {double size = 12, bool bold = true}) {
+  double px = 0;
+  for (final r in s.runes) {
+    final ch = String.fromCharCode(r);
+    if (r == 32) {
+      px += 3.5;
+    } else if ('ijlI.,:;\'|!()'.contains(ch)) {
+      px += 4;
+    } else if ('mwMW@'.contains(ch)) {
+      px += 11;
+    } else if (r >= 65 && r <= 90) {
+      px += 8.8;
+    } else if (r >= 0x0600) {
+      px += 9; // Urdu / Arabic and other wide scripts
+    } else {
+      px += 7.2;
+    }
+  }
+  px *= (size / 11) * (bold ? 1.1 : 1.0);
+  return px / 7 + 2.5;
+}
+
 // ---- Direct .xlsx writer ----
 // The excel package dropped styles and merges on some builds, so the sheet is
 // written directly as xlsx XML. Styles, merges, widths and heights are exact.
@@ -102,15 +136,22 @@ class _XlsxBuilder {
   final Map<int, double> rowHeights = {};
   final Map<int, double> colWidths = {};
   final List<String> merges = [];
-  int freezeRows = 7; // rows kept on top while scrolling (header rows)
-  int freezeCols = 3; // Roll No, Name, Father Name stay while scrolling sideways
+  // Strings are stored in a shared-strings table, exactly like Excel itself
+  // saves them (older Excel versions, e.g. 2010, are fussier with inline strings).
+  final List<String> _strings = [];
+  final Map<String, int> _stringIdx = {};
+  // A4 landscape page with normal margins, written explicitly so Excel 2010
+  // print preview (Ctrl+P) never has to guess the page settings. The sheet is
+  // fitted to one page wide (as many pages tall as needed). No freeze panes,
+  // no print titles.
 
-  // Print setup. buildAttendanceExcelBytes decides these automatically.
-  bool portrait = false;
-  bool onePage = true; // true: whole sheet fitted on one page
-  int printScale = 100; // used only when onePage is false
-  final List<int> colBreaks = []; // 0-based columns where a new page starts
-  String printTitles = ''; // rows / columns repeated on every printed page
+  int _sst(String v) {
+    final clean = v.replaceAll(_badXml, '');
+    return _stringIdx.putIfAbsent(clean, () {
+      _strings.add(clean);
+      return _strings.length - 1;
+    });
+  }
 
   int _idx(List<String> list, String xml) {
     final i = list.indexOf(xml);
@@ -159,7 +200,13 @@ class _XlsxBuilder {
         '${wrap ? ' wrapText="1"' : ''}${shrink ? ' shrinkToFit="1"' : ''}/></xf>');
   }
 
+  // Characters that are illegal in XML 1.0 (control codes, e.g. from imported
+  // names) make Excel crash or "repair" the file, so they are removed first.
+  static final RegExp _badXml =
+      RegExp('[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\uFFFE\\uFFFF]');
+
   String _esc(String s) => s
+      .replaceAll(_badXml, '')
       .replaceAll('&', '&amp;')
       .replaceAll('<', '&lt;')
       .replaceAll('>', '&gt;')
@@ -174,11 +221,8 @@ class _XlsxBuilder {
 
   void blank(int c, int r, int s) => _put(c, r, '<c r="${_ref(c, r)}" s="$s"/>');
 
-  void text(int c, int r, String v, int s) => _put(
-      c,
-      r,
-      '<c r="${_ref(c, r)}" s="$s" t="inlineStr"><is>'
-      '<t xml:space="preserve">${_esc(v)}</t></is></c>');
+  void text(int c, int r, String v, int s) => _put(c, r,
+      '<c r="${_ref(c, r)}" s="$s" t="s"><v>${_sst(v)}</v></c>');
 
   void number(int c, int r, num v, int s) =>
       _put(c, r, '<c r="${_ref(c, r)}" s="$s"><v>${_num(v)}</v></c>');
@@ -200,14 +244,22 @@ class _XlsxBuilder {
 
   List<int> build() {
     final rows = <int>{..._cells.keys, ...rowHeights.keys}.toList()..sort();
+    // Used range (A1:lastCol lastRow).
+    var maxCol = 0;
+    for (final row in _cells.values) {
+      for (final c in row.keys) {
+        if (c > maxCol) maxCol = c;
+      }
+    }
+    final dimension =
+        'A1:${_excelColLetters(maxCol)}${rows.isEmpty ? 1 : rows.last + 1}';
     final sb = StringBuffer(
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        '<sheetPr><pageSetUpPr fitToPage="${onePage ? 1 : 0}"/></sheetPr>'
-        '<sheetViews><sheetView showGridLines="0" workbookViewId="0" tabSelected="1">'
-        '<pane xSplit="$freezeCols" ySplit="$freezeRows" topLeftCell="${_excelColLetters(freezeCols)}${freezeRows + 1}" activePane="bottomRight" state="frozen"/>'
-        '</sheetView></sheetViews>'
-        '<sheetFormatPr defaultRowHeight="22" customHeight="1"/>');
+        '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>'
+        '<dimension ref="$dimension"/>'
+        '<sheetViews><sheetView workbookViewId="0" tabSelected="1"/></sheetViews>'
+        '<sheetFormatPr defaultRowHeight="22"/>');
     if (colWidths.isNotEmpty) {
       sb.write('<cols>');
       final keys = colWidths.keys.toList()..sort();
@@ -236,27 +288,20 @@ class _XlsxBuilder {
       sb.write('<mergeCells count="${merges.length}">'
           '${merges.map((m) => '<mergeCell ref="$m"/>').join()}</mergeCells>');
     }
-    // Print: A4, centered. Either the whole sheet on ONE page, or several
-    // pages at a fixed readable scale (see the layout decision below).
-    final orient = portrait ? 'portrait' : 'landscape';
-    sb.write('<printOptions horizontalCentered="1"/>'
-        '<pageMargins left="0.25" right="0.25" top="0.4" bottom="0.5" '
-        'header="0.3" footer="0.3"/>');
-    if (onePage) {
-      sb.write('<pageSetup paperSize="9" orientation="$orient" '
-          'fitToWidth="1" fitToHeight="1"/>');
-    } else {
-      sb.write('<pageSetup paperSize="9" scale="$printScale" '
-          'pageOrder="overThenDown" orientation="$orient"/>');
-    }
-    sb.write('<headerFooter><oddFooter>&amp;CPage &amp;P of &amp;N</oddFooter></headerFooter>');
-    if (colBreaks.isNotEmpty) {
-      sb.write('<colBreaks count="${colBreaks.length}" '
-          'manualBreakCount="${colBreaks.length}">'
-          '${colBreaks.map((c) => '<brk id="$c" max="1048575" man="1"/>').join()}'
-          '</colBreaks>');
-    }
+    sb.write('<pageMargins left="0.5" right="0.5" top="0.6" bottom="0.6" '
+        'header="0.3" footer="0.3"/>'
+        '<pageSetup paperSize="9" orientation="landscape" '
+        'fitToWidth="1" fitToHeight="0"/>');
     sb.write('</worksheet>');
+
+    final sst = StringBuffer(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'count="${_strings.length}" uniqueCount="${_strings.length}">');
+    for (final t in _strings) {
+      sst.write('<si><t xml:space="preserve">${_esc(t)}</t></si>');
+    }
+    sst.write('</sst>');
 
     final styles = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
@@ -275,25 +320,27 @@ class _XlsxBuilder {
         '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
         '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
         '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+        '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>'
+        '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+        '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'
         '</Types>';
     const rootRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
         '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+        '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>'
+        '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>'
         '</Relationships>';
-    final definedNames = printTitles.isEmpty
-        ? ''
-        : '<definedNames><definedName name="_xlnm.Print_Titles" '
-            'localSheetId="0">$printTitles</definedName></definedNames>';
     final workbook = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<bookViews><workbookView xWindow="0" yWindow="0" windowWidth="20000" windowHeight="10000"/></bookViews>'
         '<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>'
-        '$definedNames'
-        '<calcPr calcId="191029" fullCalcOnLoad="1"/></workbook>';
+        '<calcPr calcId="124519"/></workbook>';
     const workbookRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
         '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
         '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+        '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>'
         '</Relationships>';
 
     final out = zip.Archive();
@@ -307,7 +354,20 @@ class _XlsxBuilder {
     add('xl/workbook.xml', workbook);
     add('xl/_rels/workbook.xml.rels', workbookRels);
     add('xl/styles.xml', styles);
+    add('xl/sharedStrings.xml', sst.toString());
     add('xl/worksheets/sheet1.xml', sb.toString());
+    add(
+        'docProps/core.xml',
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" '
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+        '<dc:creator>Attendance</dc:creator></cp:coreProperties>');
+    add(
+        'docProps/app.xml',
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">'
+        '<Application>Microsoft Excel</Application></Properties>');
     return zip.ZipEncoder().encode(out) ?? <int>[];
   }
 }
@@ -483,6 +543,8 @@ List<int>? buildAttendanceExcelBytes({
   required List<DateRecord> recs,
   required List<Map<String, String>> students,
   bool useLetters = false, // true: P / A letters, false: 1 / 0 digits
+  bool showFather = true, // false: no Father Name column (monthly export)
+  bool showMarks = true, // false: no Marks column at the end (monthly export)
 }) {
   final records = List<DateRecord>.from(recs)
     ..sort((a, b) => a.id.compareTo(b.id));
@@ -492,112 +554,136 @@ List<int>? buildAttendanceExcelBytes({
   const navy = 'FF1F3864';
   const head = 'FF2F4F8F';
   const gold = 'FFC9A227';
-  const infoBg = 'FFEAF0FA';
   const bandA = 'FFFFFFFF';
   const bandB = 'FFF3F6FB';
+  const infoBg = 'FFE9EFF9';
   const green = 'FF1B7F3B';
   const red = 'FFD92D20';
-  final titleStyle = x.style(size: 20, font: 'FFFFFFFF', bg: navy, thick: true);
-  final fillerStyle = x.style(border: false);
-  final infoLabelStyle =
-      x.style(size: 12, font: 'FFFFFFFF', bg: navy, thick: true);
-  final infoValueStyle = x.style(size: 12, font: navy, bg: infoBg, thick: true);
+  const white = 'FFFFFFFF';
+
+  // ---- Header styles ----
+  final titleStyle =
+      x.style(size: 16, font: white, bg: navy, border: false);
+  final infoLabelStyle = x.style(size: 10, font: white, bg: navy);
+  final infoValueStyle =
+      x.style(size: 11, font: navy, bg: infoBg, shrink: true);
   final idHeadStyle =
-      x.style(size: 12, font: 'FFFFFFFF', bg: head, wrap: true, thick: true);
+      x.style(size: 12, font: white, bg: head, wrap: true, thick: true);
   final totalHeadStyle =
       x.style(size: 10, font: navy, bg: gold, wrap: true, thick: true);
-  final presentHeadStyle = totalHeadStyle;
-  final pctHeadStyle = totalHeadStyle;
-  final marksHeadStyle = totalHeadStyle;
+  final weekStyle = x.style(size: 11, font: white, bg: head);
+  final dateStyle = x.style(size: 10, font: navy, bg: 'FFD9E2F3', wrap: true);
+  final serialStyle =
+      x.style(size: 9, font: navy, bg: 'FFE9EFF9', bold: false);
   // Small "Lab" label above lab session columns.
   final labStyle = x.style(size: 9, font: navy, bg: gold);
 
-  // Normal cells (two alternating row backgrounds). Bold 12 pt so the
-  // printed text stays easy to read.
+  // ---- Body styles (two alternating row backgrounds, bold 12 pt) ----
+  // Present (P / 1) = green text, Absent (A / 0) = red text. Colours are
+  // written straight into each cell (no conditional formatting), so WPS /
+  // mobile viewers show them too.
   const int bodySize = 12;
   final cellStyle = x.style(size: bodySize, bg: bandA);
   final cellStyleAlt = x.style(size: bodySize, bg: bandB);
-  final nameStyle =
-      x.style(size: bodySize, left: true, bg: bandA, shrink: true);
-  final nameStyleAlt =
-      x.style(size: bodySize, left: true, bg: bandB, shrink: true);
-  final totalCellStyle = cellStyle;
-  final totalCellStyleAlt = cellStyleAlt;
-  final totalPresentStyle = cellStyle;
-  final totalPresentStyleAlt = cellStyleAlt;
-  final marksCellStyle = cellStyle;
-  final marksCellStyleAlt = cellStyleAlt;
-
-  // Present (P / 1) = green text, Absent (A / 0) = red text. Text colour
-  // only, no coloured cell background. Colours are written straight into
-  // each cell (no conditional formatting), so WPS / mobile viewers show them.
+  final nameStyle = x.style(size: bodySize, left: true, bg: bandA);
+  final nameStyleAlt = x.style(size: bodySize, left: true, bg: bandB);
   final goodStyle = x.style(size: bodySize, font: green, bg: bandA);
   final goodStyleAlt = x.style(size: bodySize, font: green, bg: bandB);
   final badStyle = x.style(size: bodySize, font: red, bg: bandA);
   final badStyleAlt = x.style(size: bodySize, font: red, bg: bandB);
 
-  // Header styles for weeks / dates / class numbers.
-  final weekHeadStyles = [
-    x.style(size: 14, font: 'FFFFFFFF', bg: head, thick: true)
-  ];
-  final weekDateStyles = [
-    x.style(size: 10, font: navy, bg: 'FFD9E2F3', wrap: true)
-  ];
-  final weekSerialStyles = [
-    x.style(size: 9, font: navy, bg: 'FFE9EFF9', bold: false)
-  ];
-
   // ---- Columns ----
-  const int firstSessionCol = 3; // 0 Roll No, 1 Name, 2 Father Name
+  // 0 Roll No, 1 Name, 2 Father Name (only when showFather), then sessions,
+  // then Total Classes, Total Present, Percentage (and Marks when showMarks).
+  final int firstSessionCol = showFather ? 3 : 2;
   final n = records.length;
   final totalClassesCol = firstSessionCol + n;
   final presentCol = totalClassesCol + 1;
   final pctCol = totalClassesCol + 2;
-  final marksCol = totalClassesCol + 3;
-  final lastCol = marksCol < 11 ? 11 : marksCol;
+  final marksCol = totalClassesCol + 3; // used only when showMarks
+  final int lastCol = showMarks ? marksCol : pctCol;
 
-  // ---- Rows ----
-  // If the file has lab sessions, one extra row sits above the header for the
-  // small "Lab" labels. Files without lab sessions keep the old layout.
+  // ---- Column widths: every text gets the width it needs (nothing cut off) ----
+  double maxRoll = _textUnits('Roll No');
+  double maxName = _textUnits('Name');
+  double maxFather = _textUnits('Father Name');
+  for (final st in students) {
+    final rw = _textUnits(rollOf(st['roll'] ?? ''));
+    final nw = _textUnits(st['name'] ?? '');
+    final fw = _textUnits(st['father'] ?? '');
+    if (rw > maxRoll) maxRoll = rw;
+    if (nw > maxName) maxName = nw;
+    if (fw > maxFather) maxFather = fw;
+  }
+  const double narrow = 8.5; // session / info columns, all equal
+  final colW = <int, double>{
+    0: maxRoll < 8 ? 8 : maxRoll,
+    1: maxName < 22 ? 22 : maxName,
+  };
+  if (showFather) colW[2] = maxFather < 16 ? 16 : maxFather;
+  double widthOf(int c) => colW[c] ?? narrow;
+
+  // ---- Row positions (0-based) ----
+  // 0 title banner, 1..3 info grid, [lab row], then Week / Date / Class No.
+  // (merged vertically for the fixed columns), then the students.
   final bool hasLab = records.any((r) => r.isLab);
   final int top = hasLab ? 1 : 0;
-  const int infoRow0 = 1;
   const int labRow = 4;
   final int weekRow = 4 + top;
   final int dateRow = 5 + top;
   final int serialRow = 6 + top;
   final int firstStudentRow = 7 + top;
-  x.freezeRows = firstStudentRow;
 
-  // Row 0: title, merged across the whole width, big and centered.
-  x.merge(0, 0, lastCol, 0, 'University of Swabi', titleStyle);
+  // ---- Title banner + info grid (merged cells) ----
+  // Width of the banner / grid: the table width (at least 11 columns so the
+  // info grid always has room for its labels and values).
+  final int wb = lastCol + 1 < 11 ? 11 : lastCol + 1;
+  final int rest = wb - 5; // columns left for the two value cells
+  final int v1End = 1 + (rest + 1) ~/ 2; // value 1 = C .. v1End
+  final int l2Start = v1End + 1; // label 2 = 3 columns
+  final int l2End = l2Start + 2;
+  final int v2Start = l2End + 1; // value 2 = v2Start .. last column
+  final int v2End = wb - 1;
 
-  void infoRow(int row, String l1, Object v1, String l2, String v2) {
-    x.merge(0, row, 1, row, l1, infoLabelStyle);
-    if (v1 is num) {
-      x.merge(2, row, 4, row, null, infoValueStyle);
-      x.number(2, row, v1, infoValueStyle);
+  x.merge(0, 0, wb - 1, 0, kInstitutionName, titleStyle);
+  x.rowHeights[0] = 30;
+
+  void putValue(int c1, int c2, int row, Object value) {
+    if (value is num) {
+      x.merge(c1, row, c2, row, null, infoValueStyle);
+      x.number(c1, row, value, infoValueStyle);
     } else {
-      x.merge(2, row, 4, row, v1.toString(), infoValueStyle);
+      final t = value.toString();
+      x.merge(c1, row, c2, row, t.isEmpty ? null : t, infoValueStyle);
     }
-    x.merge(5, row, 6, row, l2, infoLabelStyle);
-    x.merge(7, row, 11, row, v2, infoValueStyle);
-    for (int c = 12; c <= lastCol; c++) {
-      x.blank(c, row, fillerStyle);
-    }
+  }
+
+  void infoPair(int row, String label1, Object value1, String label2,
+      Object value2) {
+    x.merge(0, row, 1, row, label1, infoLabelStyle);
+    putValue(2, v1End, row, value1);
+    x.merge(l2Start, row, l2End, row, label2, infoLabelStyle);
+    putValue(v2Start, v2End, row, value2);
+    x.rowHeights[row] = 21;
   }
 
   final num marksValue =
       info.marks == info.marks.roundToDouble() ? info.marks.round() : info.marks;
-  infoRow(infoRow0, 'Program', info.program, 'Course', info.course);
-  infoRow(infoRow0 + 1, 'Semester', info.semester, 'Section', info.section);
-  infoRow(infoRow0 + 2, 'Marks', marksValue, 'Instructor', info.instructor);
-  final marksRef = '\$C\$${infoRow0 + 3}';
+  infoPair(1, 'Program', info.program, 'Course', info.course);
+  infoPair(2, 'Semester', info.semester, 'Section', info.section);
+  infoPair(3, 'Marks', marksValue, 'Instructor', info.instructor);
+  // The Marks value sits in C4; the Marks formulas read it from there.
+  final marksRef = '\$${_excelColLetters(2)}\$4';
 
   // ---- Header rows: Week / Date / Class No. ----
-  x.merge(0, weekRow, 0, serialRow, 'Roll No', idHeadStyle);
-  x.merge(1, weekRow, 1, serialRow, 'Name', idHeadStyle);
-  x.merge(2, weekRow, 2, serialRow, 'Father Name', idHeadStyle);
+  // Fixed columns: one merged cell over the three header rows.
+  void headCell(int c, String label, int st) {
+    x.merge(c, weekRow, c, serialRow, label, st);
+  }
+
+  headCell(0, 'Roll No', idHeadStyle);
+  headCell(1, 'Name', idHeadStyle);
+  if (showFather) headCell(2, 'Father Name', idHeadStyle);
 
   DateTime mondayOf(DateTime d) {
     final day = DateTime(d.year, d.month, d.day);
@@ -631,19 +717,19 @@ List<int>? buildAttendanceExcelBytes({
     }
   }
 
-  // "Week N" merged across that week's columns, centered and big.
-  int i0 = 0;
-  while (i0 < n) {
-    int i1 = i0;
-    while (i1 + 1 < n && weekOf[i1 + 1] == weekOf[i0]) {
-      i1++;
+  // "Week N" is one merged cell over all the sessions of that week.
+  int runStart = 0;
+  while (runStart < n) {
+    int runEnd = runStart;
+    while (runEnd + 1 < n && weekOf[runEnd + 1] == weekOf[runStart]) {
+      runEnd++;
     }
-    x.merge(firstSessionCol + i0, weekRow, firstSessionCol + i1, weekRow,
-        'Week ${weekOf[i0]}',
-        weekHeadStyles[(weekOf[i0] - 1) % weekHeadStyles.length]);
-    i0 = i1 + 1;
+    x.merge(firstSessionCol + runStart, weekRow, firstSessionCol + runEnd,
+        weekRow, 'Week ${weekOf[runStart]}', weekStyle);
+    runStart = runEnd + 1;
   }
 
+  // Date and class number (1st, 2nd, 3rd ...) of every session.
   int classInWeek = 0;
   for (int i = 0; i < n; i++) {
     final d = dates[i];
@@ -654,10 +740,8 @@ List<int>? buildAttendanceExcelBytes({
       classInWeek = 0;
     }
     classInWeek++;
-    final wi = (weekOf[i] - 1) % weekDateStyles.length;
-    x.text(firstSessionCol + i, dateRow, dateLabel, weekDateStyles[wi]);
-    x.text(firstSessionCol + i, serialRow, _ordinal(classInWeek),
-        weekSerialStyles[wi]);
+    x.text(firstSessionCol + i, dateRow, dateLabel, dateStyle);
+    x.text(firstSessionCol + i, serialRow, _ordinal(classInWeek), serialStyle);
   }
 
   // "Lab" label above each lab column; class columns stay empty.
@@ -667,32 +751,26 @@ List<int>? buildAttendanceExcelBytes({
         x.text(firstSessionCol + i, labRow, 'Lab', labStyle);
       }
     }
-    x.rowHeights[labRow] = 16;
   }
 
-  x.merge(totalClassesCol, weekRow, totalClassesCol, serialRow,
-      'Total Classes', totalHeadStyle);
-  x.merge(presentCol, weekRow, presentCol, serialRow, 'Total Present',
-      presentHeadStyle);
-  x.merge(pctCol, weekRow, pctCol, serialRow, 'Percentage of Present',
-      pctHeadStyle);
-  x.merge(marksCol, weekRow, marksCol, serialRow, 'Marks', marksHeadStyle);
+  headCell(totalClassesCol, 'Total Classes', totalHeadStyle);
+  headCell(presentCol, 'Total Present', totalHeadStyle);
+  headCell(pctCol, 'Percentage of Present', totalHeadStyle);
+  if (showMarks) headCell(marksCol, 'Marks', totalHeadStyle);
 
   // ---- Student rows ----
   int rowIndex = firstStudentRow;
-  int maxName = 4;
-  int maxFather = 11;
   for (final st in students) {
     final roll = st['roll'] ?? '';
     final name = st['name'] ?? '';
     final father = st['father'] ?? '';
-    if (name.length > maxName) maxName = name.length;
-    if (father.length > maxFather) maxFather = father.length;
     int present = 0;
     final alt = (rowIndex - firstStudentRow) % 2 == 1;
     x.text(0, rowIndex, rollOf(roll), alt ? cellStyleAlt : cellStyle);
     x.text(1, rowIndex, name, alt ? nameStyleAlt : nameStyle);
-    x.text(2, rowIndex, father, alt ? nameStyleAlt : nameStyle);
+    if (showFather) {
+      x.text(2, rowIndex, father, alt ? nameStyleAlt : nameStyle);
+    }
     for (int i = 0; i < n; i++) {
       final isP = (records[i].status[roll] ?? 'P') == 'P';
       if (isP) present++;
@@ -707,6 +785,7 @@ List<int>? buildAttendanceExcelBytes({
     }
 
     final xr = rowIndex + 1;
+    final plain = alt ? cellStyleAlt : cellStyle;
     final pct = n == 0 ? 0.0 : (present / n) * 100;
     final pctRounded = (pct * 100).round() / 100;
     final marksCached = (pctRounded / 100 * info.marks * 100).round() / 100;
@@ -718,133 +797,48 @@ List<int>? buildAttendanceExcelBytes({
       final tpRef = '${_excelColLetters(presentCol)}$xr';
       final pcRef = '${_excelColLetters(pctCol)}$xr';
       x.formula(totalClassesCol, rowIndex,
-          useLetters ? 'COUNTA($first:$last)' : 'COUNT($first:$last)', n,
-          alt ? totalCellStyleAlt : totalCellStyle);
+          useLetters ? 'COUNTA($first:$last)' : 'COUNT($first:$last)', n, plain);
       x.formula(
           presentCol,
           rowIndex,
           useLetters ? 'COUNTIF($first:$last,"P")' : 'SUM($first:$last)',
           present,
-          alt ? totalPresentStyleAlt : totalPresentStyle);
+          plain);
       x.formula(pctCol, rowIndex, 'IF($tcRef=0,0,ROUND($tpRef/$tcRef*100,2))',
           pctRounded,
           pct >= 75
               ? (alt ? goodStyleAlt : goodStyle)
               : (alt ? badStyleAlt : badStyle));
-      x.formula(marksCol, rowIndex, 'ROUND($pcRef/100*$marksRef,2)',
-          marksCached, alt ? marksCellStyleAlt : marksCellStyle);
+      if (showMarks) {
+        x.formula(marksCol, rowIndex, 'ROUND($pcRef/100*$marksRef,2)',
+            marksCached, plain);
+      }
     } else {
-      x.number(totalClassesCol, rowIndex, 0,
-          alt ? totalCellStyleAlt : totalCellStyle);
-      x.number(presentCol, rowIndex, 0,
-          alt ? totalPresentStyleAlt : totalPresentStyle);
+      x.number(totalClassesCol, rowIndex, 0, plain);
+      x.number(presentCol, rowIndex, 0, plain);
       x.number(pctCol, rowIndex, 0, alt ? badStyleAlt : badStyle);
-      x.number(marksCol, rowIndex, 0, alt ? marksCellStyleAlt : marksCellStyle);
+      if (showMarks) {
+        x.number(marksCol, rowIndex, 0, plain);
+      }
     }
     x.rowHeights[rowIndex] = 20;
     rowIndex++;
   }
 
-  // ---- Column widths: narrow session columns, so text can print bigger ----
-  x.colWidths[0] = 8;
-  x.colWidths[1] = (maxName * 1.2 + 3).clamp(22, 42).toDouble();
-  for (int c = 2; c <= lastCol; c++) {
-    x.colWidths[c] = 6.5; // all date / info columns equal
+  // ---- Column widths ----
+  for (int c = 0; c < wb; c++) {
+    x.colWidths[c] = widthOf(c);
   }
-  x.colWidths[2] = (maxFather * 1.2 + 3).clamp(16, 38).toDouble();
-  x.colWidths[totalClassesCol] = 8;
-  x.colWidths[presentCol] = 8;
-  x.colWidths[pctCol] = 10;
-  x.colWidths[marksCol] = 8;
+  x.colWidths[totalClassesCol] = 12;
+  x.colWidths[presentCol] = 12;
+  x.colWidths[pctCol] = 12;
+  if (showMarks) x.colWidths[marksCol] = 9;
 
-  // ---- Row heights ----
-  x.rowHeights[0] = 30;
-  for (int r = infoRow0; r < infoRow0 + 3; r++) {
-    x.rowHeights[r] = 22;
-  }
-  x.rowHeights[weekRow] = 26;
-  x.rowHeights[dateRow] = 30; // room for "14\nSep" on two lines
+  // ---- Header row heights (Week / Date / Class No. = 3 rows, 60 pt together) ----
+  if (hasLab) x.rowHeights[labRow] = 16;
+  x.rowHeights[weekRow] = 21;
+  x.rowHeights[dateRow] = 21;
   x.rowHeights[serialRow] = 18;
-
-  // ---- Print layout: decided automatically ----
-  // 1) Try the whole sheet on ONE A4 page, portrait and landscape, and keep the
-  //    better one. 2) If the text would be smaller than kMinOnePageScale (too
-  //    small to read), print on SEVERAL portrait pages instead: Roll No / Name /
-  //    Father Name and the header rows repeat on every page, and pages break
-  //    between weeks, so the text stays big and clear.
-  const double kMinOnePageScale = 0.6;
-  const double a4w = 595, a4h = 842; // A4 in points
-  const double marginX = 36, marginY = 65; // left+right, top+bottom
-  // Default font is Arial 11, whose digit is 8 px wide, so a column of width w
-  // is w * 8 px wide (the width value already includes padding).
-  double ptWidth(int c) => x.colWidths[c]! * 8 * 0.75;
-  double sheetW = 0;
-  for (int c = 0; c <= lastCol; c++) {
-    sheetW += ptWidth(c);
-  }
-  double sheetH = 0;
-  for (final h in x.rowHeights.values) {
-    sheetH += h;
-  }
-  double smaller(double a, double b) => a < b ? a : b;
-  final double scalePortrait =
-      smaller((a4w - marginX) / sheetW, (a4h - marginY) / sheetH);
-  final double scaleLandscape =
-      smaller((a4h - marginX) / sheetW, (a4w - marginY) / sheetH);
-
-  if (smaller(1.0, scalePortrait > scaleLandscape ? scalePortrait : scaleLandscape) >=
-      kMinOnePageScale) {
-    x.onePage = true;
-    x.portrait = scalePortrait >= scaleLandscape;
-  } else {
-    x.onePage = false;
-    x.portrait = true;
-    // Scale so all student rows fit one page height (between 60% and 75%).
-    double s = (a4h - marginY) / sheetH * 0.98;
-    if (s > 0.75) s = 0.75;
-    if (s < 0.6) s = 0.6;
-    final int pct = (s * 100).floor();
-    x.printScale = pct;
-
-    final double availW = (a4w - marginX) / (pct / 100) * 0.95;
-    final double fixedW = ptWidth(0) + ptWidth(1) + ptWidth(2);
-    final double colW = ptWidth(firstSessionCol);
-    final double totalsW = ptWidth(totalClassesCol) +
-        ptWidth(presentCol) +
-        ptWidth(pctCol) +
-        ptWidth(marksCol);
-    int perPage = ((availW - fixedW) / colW).floor();
-    int perLast = ((availW - fixedW - totalsW) / colW).floor();
-    if (perPage < 9) perPage = 9; // info block (Program, Course...) stays whole
-    if (perLast < 1) perLast = 1;
-
-    // Page breaks: session columns per page, breaking between weeks.
-    int start = 0;
-    while (n - start > perLast) {
-      int end = n - start <= perPage
-          ? start + (n - start + 1) ~/ 2 // balance the last two pages
-          : start + perPage;
-      final int lowest = start + ((end - start) * 2) ~/ 3;
-      for (int e = end; e > lowest; e--) {
-        if (e < n && weekOf[e] != weekOf[e - 1]) {
-          end = e;
-          break;
-        }
-      }
-      x.colBreaks.add(firstSessionCol + end);
-      start = end;
-    }
-
-    // Repeat Roll No / Name / Father Name and the header rows on every page.
-    x.printTitles =
-        'Sheet1!\$A:\$C,Sheet1!\$${labRow + 1}:\$${serialRow + 1}';
-
-    // The title bar only spans the first page, so its text is not cut.
-    final int titleEnd =
-        x.colBreaks.isEmpty ? lastCol : x.colBreaks.first - 1;
-    x.merges.remove('A1:${_excelColLetters(lastCol)}1');
-    x.merge(0, 0, titleEnd, 0, 'University of Swabi', titleStyle);
-  }
 
   return x.build();
 }

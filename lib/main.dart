@@ -76,12 +76,14 @@ void main() async {
   if (AppSession.kind == 'teacher' ||
       AppSession.kind == 'hidden' ||
       AppSession.kind == 'student') {
-    unawaited(AppSession.ensureSignedIn());
+    unawaited(AppSession.ensureSignedIn().then((_) => AppSession.recheckTeacher()));
   }
   runApp(const AttendanceApp());
 }
 
 // App-wide constants
+// Institution name printed in Excel and PDF titles. Change it here for another university.
+const String kInstitutionName = 'University of Swabi';
 const List<String> kSections = ['A', 'B', 'C', 'D'];
 const List<String> kSemesterIds = ['1', '2', '3', '4', '5', '6', '7', '8'];
 

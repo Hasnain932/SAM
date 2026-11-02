@@ -200,7 +200,7 @@ class _StudentStatCardState extends State<StudentStatCard> {
 StudentStatCard buildStudentStatCard(
     Map<String, String> student, List<DateRecord> records,
     {Key? key}) {
-  final roll = student['roll']!;
+  final roll = (student['roll'] ?? '');
   int present = 0;
   int absent = 0;
   final entries = <StatEntry>[];
@@ -1017,7 +1017,9 @@ class _AttendanceSheetScreenState extends State<AttendanceSheetScreen> {
       try {
         final c = await Connectivity().checkConnectivity();
         offline = c.every((e) => e == ConnectivityResult.none);
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('stats_screens.dart:1020: $e');
+      }
       if (!mounted) return;
       setState(() {
         _students = r[0] as List<Map<String, String>>;
@@ -1485,6 +1487,9 @@ class _MonthlyAttendanceScreenState extends State<MonthlyAttendanceScreen> {
         recs: recs,
         students: _students,
         useLetters: opt.useLetters,
+        // Monthly file: no Father Name and no Marks column, so it prints bigger
+        showFather: false,
+        showMarks: false,
       );
       if (bytes == null) throw Exception('Excel file could not be created');
 
@@ -1529,9 +1534,9 @@ class _MonthlyAttendanceScreenState extends State<MonthlyAttendanceScreen> {
     }
     double sum = 0;
     for (final s in _students) {
-      final roll = s['roll']!;
+      final roll = (s['roll'] ?? '');
       final p = _records.where((r) => r.status[roll] == 'P').length;
-      sum += (p / _records.length) * 100;
+      if (_records.isNotEmpty) sum += (p / _records.length) * 100;
     }
     final avg = sum / _students.length;
     final monthKey = DateFormat('yyyy-MM').format(_month);

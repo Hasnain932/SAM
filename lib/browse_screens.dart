@@ -138,7 +138,9 @@ class _DepartmentsScreenState extends State<DepartmentsScreen> {
           .doc('seed')
           .set({'done': true}).timeout(_kNetworkTimeout);
       await prefs.setBool('seed_done_v1', true);
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('browse_screens.dart:141: $e');
+    }
 
     if (mounted) setState(() => _seeded = true);
   }
@@ -1481,11 +1483,15 @@ class TeacherHomeScreen extends StatefulWidget {
 
 class _TeacherHomeScreenState extends State<TeacherHomeScreen> {
   StreamSubscription<List<ConnectivityResult>>? _connSub;
+  Timer? _approvalTimer;
   bool _wasOffline = false;
 
   @override
   void initState() {
     super.initState();
+    unawaited(AppSession.recheckTeacher());
+    _approvalTimer = Timer.periodic(const Duration(minutes: 30),
+        (_) => unawaited(AppSession.recheckTeacher()));
     unawaited(syncLocalDbIfStale());
     unawaited(prefetchAllData());
     unawaited(_isOnline().then((on) => _wasOffline = !on));
@@ -1493,6 +1499,7 @@ class _TeacherHomeScreenState extends State<TeacherHomeScreen> {
       resetNetCache();
       final isOffline = results.every((r) => r == ConnectivityResult.none);
       if (_wasOffline && !isOffline) {
+        unawaited(AppSession.recheckTeacher());
         unawaited(prefetchAllData());
         unawaited(syncLocalDbIfStale());
       }
@@ -1502,6 +1509,7 @@ class _TeacherHomeScreenState extends State<TeacherHomeScreen> {
 
   @override
   void dispose() {
+    _approvalTimer?.cancel();
     _connSub?.cancel();
     super.dispose();
   }
@@ -1866,7 +1874,9 @@ String _excelCellText(dynamic data) {
     try {
       final t = (inner as dynamic).text;
       if (t is String) return t.trim();
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('browse_screens.dart:1869: $e');
+    }
     return inner.toString().trim();
   } catch (_) {
     return '';

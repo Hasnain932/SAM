@@ -183,11 +183,15 @@ String _importCellText(dynamic data) {
       DateTime? dt;
       try {
         dt = inner.asDateTimeLocal() as DateTime;
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('attendance_import.dart:186: $e');
+      }
       if (dt == null) {
         try {
           dt = DateTime(inner.year as int, inner.month as int, inner.day as int);
-        } catch (_) {}
+        } catch (e) {
+          debugPrint('attendance_import.dart:190: $e');
+        }
       }
       if (dt != null) return DateFormat('yyyy-MM-dd').format(dt);
     }
@@ -195,7 +199,9 @@ String _importCellText(dynamic data) {
       final d = inner.value as double;
       return d == d.roundToDouble() ? d.toInt().toString() : d.toString();
     }
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('attendance_import.dart:198: $e');
+  }
   return _excelCellText(data);
 }
 
@@ -927,8 +933,8 @@ Map<int, String> autoMatchImportRows(
   final result = <int, String>{};
   final taken = <String>{};
   void take(int i, Map<String, String> s) {
-    result[i] = s['roll']!;
-    taken.add(s['roll']!);
+    result[i] = (s['roll'] ?? '');
+    taken.add(s['roll'] ?? '');
   }
 
   final byKey = <String, List<Map<String, String>>>{};
@@ -938,7 +944,7 @@ Map<int, String> autoMatchImportRows(
   List<Map<String, String>> freeOf(int i) => [
         for (final s in byKey[_sortedCanon(rows[i].name)] ??
             const <Map<String, String>>[])
-          if (!taken.contains(s['roll']!)) s
+          if (!taken.contains(s['roll'] ?? '')) s
       ];
 
   // 1a) rows that have a father name: name + father name together.
@@ -970,8 +976,8 @@ Map<int, String> autoMatchImportRows(
   for (var i = 0; i < rows.length; i++) {
     if (result.containsKey(i) || rows[i].roll.isEmpty) continue;
     for (final s in students) {
-      if (taken.contains(s['roll']!)) continue;
-      if (rows[i].roll.trim() != rollOf(s['roll']!).trim()) continue;
+      if (taken.contains(s['roll'] ?? '')) continue;
+      if (rows[i].roll.trim() != rollOf(s['roll'] ?? '').trim()) continue;
       if (_fatherCompat(s['father'] ?? '', rows[i].father) == false) continue;
       take(i, s);
       break;
@@ -984,7 +990,7 @@ Map<int, String> autoMatchImportRows(
     var best = 0.0, second = 0.0;
     Map<String, String>? bs;
     for (final s in students) {
-      if (taken.contains(s['roll']!)) continue;
+      if (taken.contains(s['roll'] ?? '')) continue;
       if (_fatherCompat(s['father'] ?? '', rows[i].father) == false) continue;
       final sim = _personSim(rows[i].name, s['name'] ?? '');
       if (sim > best) {
@@ -1019,7 +1025,9 @@ Future<ImportSheet?> pickAttendanceSheetFromFile(BuildContext context) async {
   Uint8List? bytes;
   try {
     bytes = await f.readAsBytes();
-  } catch (_) {}
+  } catch (e) {
+    debugPrint('attendance_import.dart:1022: $e');
+  }
   if (bytes == null) {
     if (!context.mounted) return null;
     _importSnack(context, 'Could not read the selected file.');
@@ -1229,7 +1237,7 @@ class _ImportReviewScreenState extends State<ImportReviewScreen> {
                             DropdownMenuItem<String?>(
                               value: s['roll'],
                               child: Text(
-                                '${rollOf(s['roll']!)} • ${s['name']}'
+                                '${rollOf(s['roll'] ?? '')} • ${s['name']}'
                                 '${(s['father'] ?? '').isEmpty ? '' : ' (F/N ${s['father']})'}',
                                 overflow: TextOverflow.ellipsis,
                               ),
